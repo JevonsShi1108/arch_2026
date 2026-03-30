@@ -17,7 +17,7 @@ module muldiv_stub import common::*;(
     output logic result_valid,
     output u64   result
 );
-    // TODO(Lab2+): 在这里接入真正的多周期乘除法单元。
+    // TODO: 之后接入多周期乘除法单元。
     // 预期接口:
     //  - req_valid/op_a/op_b/op_sel 发起请求
     //  - busy 表示单元占用

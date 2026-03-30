@@ -19,6 +19,7 @@ module execute import common::*;(
     input  logic is_jal,
     input  logic is_jalr,
     input  logic is_ebreak,
+    input  logic is_trap,
     input  logic is_muldiv,
     input  u3    br_funct3,
     input  u4    alu_op,
@@ -35,6 +36,7 @@ module execute import common::*;(
     output logic out_reg_write,
     output u64   out_result,
     output logic out_is_ebreak,
+    output logic out_is_trap,
     output logic branch_mispredict,
     output u64   branch_correct_pc
 );
@@ -102,7 +104,7 @@ module execute import common::*;(
             wb_val = {{32{wb_val[31]}}, wb_val[31:0]};
         end
 
-        // TODO(Lab2+): M 扩展执行路径改为 muldiv 多周期单元握手。
+        // TODO: 之后 M 扩展执行路径改为 muldiv 多周期单元握手。
         if (is_muldiv) begin
             wb_val = muldiv_result;
         end
@@ -113,10 +115,11 @@ module execute import common::*;(
     assign out_instr      = instr;
     assign out_rd         = rd;
     assign out_is_ebreak  = is_ebreak;
+    assign out_is_trap    = is_trap;
     assign out_result     = wb_val;
-    assign out_reg_write  = valid & reg_write & !is_ebreak & !is_branch & !is_muldiv;
+    assign out_reg_write  = valid & reg_write & !is_trap & !is_branch & !is_muldiv;
 
-    // Lab1 中 mul/div 未实现: 检测到 muldiv 指令时先不写回，后续由 TODO 接管。
+    // 现在 mul/div 未实现: 检测到 muldiv 指令时先不写回，由 TODO 接管。
     assign branch_mispredict = valid & is_ctrl &
                                ((branch_taken != pred_taken) |
                                 (branch_taken & pred_taken & (branch_target != pred_target)));

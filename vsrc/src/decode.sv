@@ -21,6 +21,7 @@ module decode import common::*;(
     output logic is_jal,
     output logic is_jalr,
     output logic is_ebreak,
+    output logic is_trap,
     output logic is_muldiv,
     output u3    br_funct3,
     output u4    alu_op
@@ -61,6 +62,7 @@ module decode import common::*;(
         is_jal    = 1'b0;
         is_jalr   = 1'b0;
         is_ebreak = 1'b0;
+        is_trap   = 1'b0;
         is_muldiv = 1'b0;
         br_funct3 = funct3;
         alu_op    = ALU_ADD;
@@ -103,7 +105,7 @@ module decode import common::*;(
                     {7'b0000000, 3'b110}: alu_op = ALU_OR;  // or
                     {7'b0000000, 3'b100}: alu_op = ALU_XOR; // xor
                     default: begin
-                        // TODO(Lab2+): 在这里接入 M 扩展 mul/div/rem 指令译码
+                        // TODO: 之后在这里接入 M 扩展 mul/div/rem 指令译码
                         // mul/div/divu/rem/remu
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
@@ -121,7 +123,7 @@ module decode import common::*;(
                     {7'b0000000, 3'b000}: alu_op = ALU_ADD; // addw
                     {7'b0100000, 3'b000}: alu_op = ALU_SUB; // subw
                     default: begin
-                        // TODO(Lab2+): 在这里接入 M 扩展 32 位指令译码
+                        // TODO: 之后在这里接入 M 扩展 32 位指令译码
                         // mulw/divw/divuw/remw/remuw
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
@@ -151,10 +153,15 @@ module decode import common::*;(
                 // ebreak: 0x00100073
                 if (instr == 32'h00100073) begin
                     is_ebreak = 1'b1;
+                    is_trap   = 1'b1;
                 end
             end
+            7'b1101011: begin
+                // Lab1 结束指令（nemu_trap），例如 0x0005006b
+                is_trap = 1'b1;
+            end
             default: begin
-                // 其他指令在 Lab1 暂不实现，按 NOP 处理
+                // 其他指令暂不实现，按 NOP 处理
             end
         endcase
     end

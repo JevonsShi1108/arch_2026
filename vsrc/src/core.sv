@@ -43,6 +43,7 @@ module core import common::*;(
 		logic is_jal;
 		logic is_jalr;
 		logic is_ebreak;
+		logic is_trap;
 		logic is_muldiv;
 		u3    br_funct3;
 		u4    alu_op;
@@ -58,6 +59,7 @@ module core import common::*;(
 		logic reg_write;
 		u64   result;
 		logic is_ebreak;
+		logic is_trap;
 	} ex_mem_t;
 
 	typedef struct packed {
@@ -68,6 +70,7 @@ module core import common::*;(
 		logic reg_write;
 		u64   result;
 		logic is_ebreak;
+		logic is_trap;
 	} mem_wb_t;
 
 	localparam u4 ALU_ADD = 4'd0;
@@ -81,9 +84,7 @@ module core import common::*;(
 	ex_mem_t ex_mem;
 	mem_wb_t mem_wb;
 
-	// -------------------------
 	// Fetch
-	// -------------------------
 	logic fetch_ok;
 	logic fetch_valid;
 	logic fetch_stale;
@@ -91,12 +92,12 @@ module core import common::*;(
 	u32   fetch_instr;
 	logic branch_mispredict;
 	u64   branch_correct_pc;
-	logic halted;
+	logic cpu_halt;
 
 	fetch u_fetch(
 		.clk,
 		.reset,
-		.stop_fetch(halted),
+		.stop_fetch(cpu_halt),
 		.redirect_valid(branch_mispredict),
 		.redirect_pc(branch_correct_pc),
 		.fetch_ok,
@@ -108,13 +109,11 @@ module core import common::*;(
 		.iresp
 	);
 
-	// -------------------------
 	// Decode + Predictor
-	// -------------------------
 	u5    dec_rs1, dec_rs2, dec_rd;
 	u64   dec_imm;
 	logic dec_use_rs1, dec_use_rs2, dec_reg_write, dec_is_imm, dec_is_word;
-	logic dec_is_branch, dec_is_jal, dec_is_jalr, dec_is_ebreak, dec_is_muldiv;
+	logic dec_is_branch, dec_is_jal, dec_is_jalr, dec_is_ebreak, dec_is_trap, dec_is_muldiv;
 	u3    dec_br_funct3;
 	u4    dec_alu_op;
 	logic dec_pred_taken;
@@ -136,6 +135,7 @@ module core import common::*;(
 		.is_jal(dec_is_jal),
 		.is_jalr(dec_is_jalr),
 		.is_ebreak(dec_is_ebreak),
+		.is_trap(dec_is_trap),
 		.is_muldiv(dec_is_muldiv),
 		.br_funct3(dec_br_funct3),
 		.alu_op(dec_alu_op)
@@ -151,10 +151,9 @@ module core import common::*;(
 		.pred_target(dec_pred_target)
 	);
 
-	// -------------------------
 	// Register file + forwarding
-	// -------------------------
 	u64 rf_rdata1, rf_rdata2;
+	u64 rf_reg_state[31:0];
 	u64 rf_next_reg[31:0];
 	logic wb_wen;
 	u5    wb_wdest;
@@ -170,6 +169,7 @@ module core import common::*;(
 		.raddr2(dec_rs2),
 		.rdata1(rf_rdata1),
 		.rdata2(rf_rdata2),
+		.reg_state(rf_reg_state),
 		.next_reg(rf_next_reg)
 	);
 
@@ -210,9 +210,7 @@ module core import common::*;(
 		id_alu_op2 = dec_is_imm ? dec_imm : id_op2_pre;
 	end
 
-	// -------------------------
 	// Execute
-	// -------------------------
 	logic muldiv_busy, muldiv_ready, muldiv_result_valid;
 	u64   muldiv_result;
 
@@ -229,7 +227,7 @@ module core import common::*;(
 		.result(muldiv_result)
 	);
 
-	logic ex_valid, ex_out_reg_write, ex_out_is_ebreak;
+	logic ex_valid, ex_out_reg_write, ex_out_is_ebreak, ex_out_is_trap;
 	u64   ex_out_pc, ex_out_result;
 	u32   ex_out_instr;
 	u5    ex_out_rd;
@@ -248,6 +246,7 @@ module core import common::*;(
 		.is_jal(id_ex.is_jal),
 		.is_jalr(id_ex.is_jalr),
 		.is_ebreak(id_ex.is_ebreak),
+		.is_trap(id_ex.is_trap),
 		.is_muldiv(id_ex.is_muldiv),
 		.br_funct3(id_ex.br_funct3),
 		.alu_op(id_ex.alu_op),
@@ -264,14 +263,13 @@ module core import common::*;(
 		.out_reg_write(ex_out_reg_write),
 		.out_result(ex_out_result),
 		.out_is_ebreak(ex_out_is_ebreak),
+		.out_is_trap(ex_out_is_trap),
 		.branch_mispredict,
 		.branch_correct_pc
 	);
 
-	// -------------------------
 	// MEM
-	// -------------------------
-	logic mem_out_valid, mem_out_reg_write, mem_out_is_ebreak;
+	logic mem_out_valid, mem_out_reg_write, mem_out_is_ebreak, mem_out_is_trap;
 	u64   mem_out_pc, mem_out_result;
 	u32   mem_out_instr;
 	u5    mem_out_rd;
@@ -284,19 +282,19 @@ module core import common::*;(
 		.in_reg_write(ex_mem.reg_write),
 		.in_result(ex_mem.result),
 		.in_is_ebreak(ex_mem.is_ebreak),
+		.in_is_trap(ex_mem.is_trap),
 		.out_valid(mem_out_valid),
 		.out_pc(mem_out_pc),
 		.out_instr(mem_out_instr),
 		.out_rd(mem_out_rd),
 		.out_reg_write(mem_out_reg_write),
 		.out_result(mem_out_result),
-		.out_is_ebreak(mem_out_is_ebreak)
+		.out_is_ebreak(mem_out_is_ebreak),
+		.out_is_trap(mem_out_is_trap)
 	);
 
-	// -------------------------
 	// WB
-	// -------------------------
-	logic wb_valid, wb_is_ebreak;
+	logic wb_valid, wb_is_ebreak, wb_is_trap;
 	u64   wb_pc;
 	u32   wb_instr;
 
@@ -308,18 +306,24 @@ module core import common::*;(
 		.in_reg_write(mem_wb.reg_write),
 		.in_result(mem_wb.result),
 		.in_is_ebreak(mem_wb.is_ebreak),
+		.in_is_trap(mem_wb.is_trap),
 		.wb_valid,
 		.wb_pc,
 		.wb_instr,
 		.wb_wen,
 		.wb_wdest,
 		.wb_wdata,
-		.wb_is_ebreak
+		.wb_is_ebreak,
+		.wb_is_trap
 	);
 
-	// -------------------------
+	// Commit register for Difftest
+	logic commit_valid, commit_wen, commit_is_trap;
+	u64   commit_pc, commit_wdata;
+	u32   commit_instr;
+	u5    commit_wdest;
+
 	// Pipeline registers update
-	// -------------------------
 	u64 cycle_cnt, instr_cnt;
 	u64 cycle_cnt_n, instr_cnt_n;
 	assign cycle_cnt_n = cycle_cnt + 64'd1;
@@ -334,20 +338,36 @@ module core import common::*;(
 
 	always_ff @(posedge clk) begin
 		if (reset) begin
-			if_id     <= '0;
-			id_ex     <= '0;
-			ex_mem    <= '0;
-			mem_wb    <= '0;
-			halted    <= 1'b0;
+			if_id        <= '0;
+			id_ex        <= '0;
+			ex_mem       <= '0;
+			mem_wb       <= '0;
+			commit_valid <= 1'b0;
+			commit_pc    <= 64'd0;
+			commit_instr <= 32'd0;
+			commit_wen   <= 1'b0;
+			commit_wdest <= 5'd0;
+			commit_wdata <= 64'd0;
+			commit_is_trap <= 1'b0;
+			cpu_halt     <= 1'b0;
 			cycle_cnt <= 64'd0;
 			instr_cnt <= 64'd0;
 		end else begin
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
 
-			if (wb_is_ebreak) begin
-				// ebreak 提交后直接停止并清空年轻流水项，避免 trap 后继续提交
-				halted      <= 1'b1;
+			// commit 寄存：将 WB 提交点打一拍后提供给 Difftest
+			commit_valid   <= wb_valid & !cpu_halt;
+			commit_pc      <= wb_pc;
+			commit_instr   <= wb_instr;
+			commit_wen     <= wb_wen;
+			commit_wdest   <= wb_wdest;
+			commit_wdata   <= wb_wdata;
+			commit_is_trap <= wb_is_trap;
+
+			if (wb_is_trap) begin
+				// trap 指令在 WB 到达后，下一周期彻底停机，避免继续提交
+				cpu_halt     <= 1'b1;
 				if_id.valid <= 1'b0;
 				id_ex.valid <= 1'b0;
 				ex_mem.valid<= 1'b0;
@@ -361,6 +381,7 @@ module core import common::*;(
 				mem_wb.reg_write<= mem_out_reg_write;
 				mem_wb.result   <= mem_out_result;
 				mem_wb.is_ebreak<= mem_out_is_ebreak;
+				mem_wb.is_trap  <= mem_out_is_trap;
 
 				// MEM pipeline register
 				ex_mem.valid     <= ex_valid;
@@ -370,6 +391,7 @@ module core import common::*;(
 				ex_mem.reg_write <= ex_out_reg_write;
 				ex_mem.result    <= ex_out_result;
 				ex_mem.is_ebreak <= ex_out_is_ebreak;
+				ex_mem.is_trap   <= ex_out_is_trap;
 
 				if (branch_mispredict) begin
 					// 冲刷水线中所有年轻指令
@@ -392,6 +414,7 @@ module core import common::*;(
 					id_ex.is_jal     <= dec_is_jal;
 					id_ex.is_jalr    <= dec_is_jalr;
 					id_ex.is_ebreak  <= dec_is_ebreak;
+					id_ex.is_trap    <= dec_is_trap;
 					id_ex.is_muldiv  <= dec_is_muldiv;
 					id_ex.br_funct3  <= dec_br_funct3;
 					id_ex.alu_op     <= dec_alu_op;
@@ -399,7 +422,7 @@ module core import common::*;(
 					id_ex.pred_target<= dec_pred_target;
 
 					// IF/ID
-					if (fetch_valid && !fetch_stale && !halted) begin
+					if (fetch_valid && !fetch_stale && !cpu_halt) begin
 						if_id.valid <= 1'b1;
 						if_id.pc    <= fetch_pc;
 						if_id.instr <= fetch_instr;
@@ -411,73 +434,73 @@ module core import common::*;(
 		end
 	end
 
-	// Lab1 暂不实现 dcache 通路
+	// 现在还没实现 dcache 通路
 	assign dreq.valid  = 1'b0;
 	assign dreq.addr   = 64'd0;
 	assign dreq.size   = MSIZE8;
 	assign dreq.strobe = 8'd0;
 	assign dreq.data   = 64'd0;
-	`UNUSED_OK({dresp, trint, swint, exint, step})
+	`UNUSED_OK({dresp, trint, swint, exint, step, wb_is_ebreak, rf_next_reg[0]})
 
 `ifdef VERILATOR
 	DifftestInstrCommit DifftestInstrCommit(
 		.clock              (clk),
 		.coreid             (0),
 		.index              (0),
-		.valid              (wb_valid),
-		.pc                 (wb_pc),
-		.instr              (wb_instr),
+		.valid              (commit_valid),
+		.pc                 (commit_pc),
+		.instr              (commit_instr),
 		.skip               (0),
 		.isRVC              (0),
 		.scFailed           (0),
-		.wen                (wb_wen),
-		.wdest              ({3'b0, wb_wdest}),
-		.wdata              (wb_wdata)
+		.wen                (commit_wen),
+		.wdest              ({3'b0, commit_wdest}),
+		.wdata              (commit_wdata)
 	);
 
 	DifftestArchIntRegState DifftestArchIntRegState (
 		.clock              (clk),
 		.coreid             (0),
-		.gpr_0              (rf_next_reg[0]),
-		.gpr_1              (rf_next_reg[1]),
-		.gpr_2              (rf_next_reg[2]),
-		.gpr_3              (rf_next_reg[3]),
-		.gpr_4              (rf_next_reg[4]),
-		.gpr_5              (rf_next_reg[5]),
-		.gpr_6              (rf_next_reg[6]),
-		.gpr_7              (rf_next_reg[7]),
-		.gpr_8              (rf_next_reg[8]),
-		.gpr_9              (rf_next_reg[9]),
-		.gpr_10             (rf_next_reg[10]),
-		.gpr_11             (rf_next_reg[11]),
-		.gpr_12             (rf_next_reg[12]),
-		.gpr_13             (rf_next_reg[13]),
-		.gpr_14             (rf_next_reg[14]),
-		.gpr_15             (rf_next_reg[15]),
-		.gpr_16             (rf_next_reg[16]),
-		.gpr_17             (rf_next_reg[17]),
-		.gpr_18             (rf_next_reg[18]),
-		.gpr_19             (rf_next_reg[19]),
-		.gpr_20             (rf_next_reg[20]),
-		.gpr_21             (rf_next_reg[21]),
-		.gpr_22             (rf_next_reg[22]),
-		.gpr_23             (rf_next_reg[23]),
-		.gpr_24             (rf_next_reg[24]),
-		.gpr_25             (rf_next_reg[25]),
-		.gpr_26             (rf_next_reg[26]),
-		.gpr_27             (rf_next_reg[27]),
-		.gpr_28             (rf_next_reg[28]),
-		.gpr_29             (rf_next_reg[29]),
-		.gpr_30             (rf_next_reg[30]),
-		.gpr_31             (rf_next_reg[31])
+		.gpr_0              (rf_reg_state[0]),
+		.gpr_1              (rf_reg_state[1]),
+		.gpr_2              (rf_reg_state[2]),
+		.gpr_3              (rf_reg_state[3]),
+		.gpr_4              (rf_reg_state[4]),
+		.gpr_5              (rf_reg_state[5]),
+		.gpr_6              (rf_reg_state[6]),
+		.gpr_7              (rf_reg_state[7]),
+		.gpr_8              (rf_reg_state[8]),
+		.gpr_9              (rf_reg_state[9]),
+		.gpr_10             (rf_reg_state[10]),
+		.gpr_11             (rf_reg_state[11]),
+		.gpr_12             (rf_reg_state[12]),
+		.gpr_13             (rf_reg_state[13]),
+		.gpr_14             (rf_reg_state[14]),
+		.gpr_15             (rf_reg_state[15]),
+		.gpr_16             (rf_reg_state[16]),
+		.gpr_17             (rf_reg_state[17]),
+		.gpr_18             (rf_reg_state[18]),
+		.gpr_19             (rf_reg_state[19]),
+		.gpr_20             (rf_reg_state[20]),
+		.gpr_21             (rf_reg_state[21]),
+		.gpr_22             (rf_reg_state[22]),
+		.gpr_23             (rf_reg_state[23]),
+		.gpr_24             (rf_reg_state[24]),
+		.gpr_25             (rf_reg_state[25]),
+		.gpr_26             (rf_reg_state[26]),
+		.gpr_27             (rf_reg_state[27]),
+		.gpr_28             (rf_reg_state[28]),
+		.gpr_29             (rf_reg_state[29]),
+		.gpr_30             (rf_reg_state[30]),
+		.gpr_31             (rf_reg_state[31])
 	);
 
     DifftestTrapEvent DifftestTrapEvent(
 		.clock              (clk),
 		.coreid             (0),
-		.valid              (wb_is_ebreak),
-		.code               (rf_next_reg[10][2:0]),
-		.pc                 (wb_pc),
+		.valid              (commit_valid & commit_is_trap),
+		.code               (rf_reg_state[10][2:0]),
+		.pc                 (commit_pc),
 		.cycleCnt           (cycle_cnt_n),
 		.instrCnt           (instr_cnt_n)
 	);

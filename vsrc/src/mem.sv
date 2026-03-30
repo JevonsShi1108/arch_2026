@@ -13,16 +13,17 @@ module mem_stage import common::*;(
     input  logic in_reg_write,
     input  u64   in_result,
     input  logic in_is_ebreak,
+    input  logic in_is_trap,
     output logic out_valid,
     output u64   out_pc,
     output u32   out_instr,
     output u5    out_rd,
     output logic out_reg_write,
     output u64   out_result,
-    output logic out_is_ebreak
+    output logic out_is_ebreak,
+    output logic out_is_trap
 );
-    // Lab1 暂无数据访存指令，MEM 阶段先做直通。
-    // TODO(Lab2+): 在此接入 load/store 的请求、等待与旁路策略。
+    // 目前先做直通。
     assign out_valid     = in_valid;
     assign out_pc        = in_pc;
     assign out_instr     = in_instr;
@@ -30,6 +31,7 @@ module mem_stage import common::*;(
     assign out_reg_write = in_reg_write;
     assign out_result    = in_result;
     assign out_is_ebreak = in_is_ebreak;
+    assign out_is_trap   = in_is_trap;
 endmodule
 
 `endif

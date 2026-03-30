@@ -15,6 +15,7 @@ module regfile import common::*;(
     input  u5    raddr2,
     output u64   rdata1,
     output u64   rdata2,
+    output u64   reg_state[31:0],
     output u64   next_reg[31:0]
 );
     u64 REG[31:0];
@@ -52,6 +53,7 @@ module regfile import common::*;(
         genvar gi;
         for (gi = 0; gi < 32; gi = gi + 1) begin : GEN_NEXT_REG
             assign next_reg[gi] = next_reg_int[gi];
+            assign reg_state[gi] = REG[gi];
         end
     endgenerate
 endmodule
