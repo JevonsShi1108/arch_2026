@@ -24,7 +24,7 @@ handin:
 sim-verilog:
 	@echo "I don't know why, just make difftest happy..."
 
-DIFFTEST_OPTS = DELAY=0 # remove on lab 2
+# DIFFTEST_OPTS = DELAY=0 # remove on lab 2
 
 emu:
 	$(MAKE) -C ./difftest emu $(DIFFTEST_OPTS)
@@ -51,6 +51,12 @@ test-lab3: sim
 
 test-lab3-extra: sim
 	TEST=$(TEST) ./build/emu --diff $(NEMU_HOME)/riscv64-nemu-interpreter-so -i ./ready-to-run/lab3/lab3-extra-test.bin $(VOPT) || true
+
+test-lab4: sim
+	TEST=$(TEST) ./build/emu --diff $(NEMU_HOME)/riscv64-nemu-interpreter-so -i ./ready-to-run/lab4/lab4-test.bin $(VOPT) || true
+
+test-lab5: sim
+	TEST=$(TEST) ./build/emu --diff $(NEMU_HOME)/riscv64-nemu-interpreter-so -i ./ready-to-run/lab5/kernel.bin $(VOPT) || true
 
 clean:
 	rm -rf build
