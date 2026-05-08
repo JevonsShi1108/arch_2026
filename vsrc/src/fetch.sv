@@ -47,7 +47,8 @@ module fetch import common::*;(
 
             if (pending && iresp.data_ok) begin
                 if (stop_fetch) begin
-                    pending <= 1'b0;
+                    pending <= 1'b1;
+                    req_pc  <= req_pc;
                 end else begin
                     pending <= 1'b1;
                     if (redirect_pending || redirect_valid) begin

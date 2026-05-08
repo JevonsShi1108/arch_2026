@@ -35,13 +35,20 @@ module core import common::*;(
 		u5    rs1;
 		u5    rs2;
 		u64   op1;
-		u64   op2;
+		u64   rs2_val;
 		u64   imm;
 		logic reg_write;
+		logic is_imm;
 		logic is_word;
 		logic is_branch;
 		logic is_jal;
 		logic is_jalr;
+		logic is_auipc;
+		logic is_lui;
+		logic is_load;
+		logic is_store;
+		msize_t mem_size;
+		logic load_unsigned;
 		logic is_ebreak;
 		logic is_trap;
 		logic is_muldiv;
@@ -58,6 +65,12 @@ module core import common::*;(
 		u5    rd;
 		logic reg_write;
 		u64   result;
+		logic is_load;
+		logic is_store;
+		msize_t mem_size;
+		logic load_unsigned;
+		u64   mem_addr;
+		u64   store_data;
 		logic is_ebreak;
 		logic is_trap;
 	} ex_mem_t;
@@ -69,6 +82,9 @@ module core import common::*;(
 		u5    rd;
 		logic reg_write;
 		u64   result;
+		logic is_load;
+		logic is_store;
+		u64   mem_addr;
 		logic is_ebreak;
 		logic is_trap;
 	} mem_wb_t;
@@ -93,11 +109,12 @@ module core import common::*;(
 	logic branch_mispredict;
 	u64   branch_correct_pc;
 	logic cpu_halt;
+	logic mem_wait;
 
 	fetch u_fetch(
 		.clk,
 		.reset,
-		.stop_fetch(cpu_halt),
+		.stop_fetch(cpu_halt | mem_wait),
 		.redirect_valid(branch_mispredict),
 		.redirect_pc(branch_correct_pc),
 		.fetch_ok,
@@ -113,7 +130,10 @@ module core import common::*;(
 	u5    dec_rs1, dec_rs2, dec_rd;
 	u64   dec_imm;
 	logic dec_use_rs1, dec_use_rs2, dec_reg_write, dec_is_imm, dec_is_word;
-	logic dec_is_branch, dec_is_jal, dec_is_jalr, dec_is_ebreak, dec_is_trap, dec_is_muldiv;
+	logic dec_is_branch, dec_is_jal, dec_is_jalr, dec_is_auipc, dec_is_lui, dec_is_load, dec_is_store;
+	msize_t dec_mem_size;
+	logic dec_load_unsigned;
+	logic dec_is_ebreak, dec_is_trap, dec_is_muldiv;
 	u3    dec_br_funct3;
 	u4    dec_alu_op;
 	logic dec_pred_taken;
@@ -134,6 +154,12 @@ module core import common::*;(
 		.is_branch(dec_is_branch),
 		.is_jal(dec_is_jal),
 		.is_jalr(dec_is_jalr),
+		.is_auipc(dec_is_auipc),
+		.is_lui(dec_is_lui),
+		.is_load(dec_is_load),
+		.is_store(dec_is_store),
+		.mem_size(dec_mem_size),
+		.load_unsigned(dec_load_unsigned),
 		.is_ebreak(dec_is_ebreak),
 		.is_trap(dec_is_trap),
 		.is_muldiv(dec_is_muldiv),
@@ -174,13 +200,12 @@ module core import common::*;(
 	);
 
 	u64 id_op1_pre;
-	u64 id_op2_pre;
-	u64 id_alu_op2;
+	u64 id_rs2_pre;
 
 	logic ex_fwd_valid;
 	u5    ex_fwd_rd;
 	u64   ex_fwd_data;
-	assign ex_fwd_valid = ex_valid & ex_out_reg_write & (ex_out_rd != 5'd0);
+	assign ex_fwd_valid = ex_valid & ex_out_reg_write & !ex_out_is_load & (ex_out_rd != 5'd0);
 	assign ex_fwd_rd    = ex_out_rd;
 	assign ex_fwd_data  = ex_out_result;
 
@@ -189,25 +214,25 @@ module core import common::*;(
 		if (dec_use_rs1 && (dec_rs1 != 5'd0)) begin
 			if (ex_fwd_valid && (ex_fwd_rd == dec_rs1)) begin
 				id_op1_pre = ex_fwd_data;
-			end else if (ex_mem.valid && ex_mem.reg_write && (ex_mem.rd != 5'd0) && (ex_mem.rd == dec_rs1)) begin
+			end else if (ex_mem.valid && ex_mem.reg_write && !ex_mem.is_load &&
+			             (ex_mem.rd != 5'd0) && (ex_mem.rd == dec_rs1)) begin
 				id_op1_pre = ex_mem.result;
 			end else if (mem_wb.valid && mem_wb.reg_write && (mem_wb.rd != 5'd0) && (mem_wb.rd == dec_rs1)) begin
 				id_op1_pre = mem_wb.result;
 			end
 		end
 
-		id_op2_pre = rf_rdata2;
+		id_rs2_pre = rf_rdata2;
 		if (dec_use_rs2 && (dec_rs2 != 5'd0)) begin
 			if (ex_fwd_valid && (ex_fwd_rd == dec_rs2)) begin
-				id_op2_pre = ex_fwd_data;
-			end else if (ex_mem.valid && ex_mem.reg_write && (ex_mem.rd != 5'd0) && (ex_mem.rd == dec_rs2)) begin
-				id_op2_pre = ex_mem.result;
+				id_rs2_pre = ex_fwd_data;
+			end else if (ex_mem.valid && ex_mem.reg_write && !ex_mem.is_load &&
+			             (ex_mem.rd != 5'd0) && (ex_mem.rd == dec_rs2)) begin
+				id_rs2_pre = ex_mem.result;
 			end else if (mem_wb.valid && mem_wb.reg_write && (mem_wb.rd != 5'd0) && (mem_wb.rd == dec_rs2)) begin
-				id_op2_pre = mem_wb.result;
+				id_rs2_pre = mem_wb.result;
 			end
 		end
-
-		id_alu_op2 = dec_is_imm ? dec_imm : id_op2_pre;
 	end
 
 	// Execute
@@ -219,7 +244,7 @@ module core import common::*;(
 		.reset,
 		.req_valid(id_ex.valid & id_ex.is_muldiv),
 		.op_a(id_ex.op1),
-		.op_b(id_ex.op2),
+		.op_b(id_ex.rs2_val),
 		.op_sel(3'd0),
 		.busy(muldiv_busy),
 		.ready(muldiv_ready),
@@ -227,8 +252,11 @@ module core import common::*;(
 		.result(muldiv_result)
 	);
 
-	logic ex_valid, ex_out_reg_write, ex_out_is_ebreak, ex_out_is_trap;
+	logic ex_valid, ex_out_reg_write, ex_out_is_load, ex_out_is_store;
+	logic ex_out_load_unsigned, ex_out_is_ebreak, ex_out_is_trap;
+	msize_t ex_out_mem_size;
 	u64   ex_out_pc, ex_out_result;
+	u64   ex_out_mem_addr, ex_out_store_data;
 	u32   ex_out_instr;
 	u5    ex_out_rd;
 
@@ -238,13 +266,20 @@ module core import common::*;(
 		.instr(id_ex.instr),
 		.rd(id_ex.rd),
 		.op1(id_ex.op1),
-		.op2(id_ex.op2),
+		.rs2_val(id_ex.rs2_val),
 		.imm(id_ex.imm),
 		.reg_write(id_ex.reg_write),
+		.is_imm(id_ex.is_imm),
 		.is_word(id_ex.is_word),
 		.is_branch(id_ex.is_branch),
 		.is_jal(id_ex.is_jal),
 		.is_jalr(id_ex.is_jalr),
+		.is_auipc(id_ex.is_auipc),
+		.is_lui(id_ex.is_lui),
+		.is_load(id_ex.is_load),
+		.is_store(id_ex.is_store),
+		.mem_size(id_ex.mem_size),
+		.load_unsigned(id_ex.load_unsigned),
 		.is_ebreak(id_ex.is_ebreak),
 		.is_trap(id_ex.is_trap),
 		.is_muldiv(id_ex.is_muldiv),
@@ -262,6 +297,12 @@ module core import common::*;(
 		.out_rd(ex_out_rd),
 		.out_reg_write(ex_out_reg_write),
 		.out_result(ex_out_result),
+		.out_is_load(ex_out_is_load),
+		.out_is_store(ex_out_is_store),
+		.out_mem_size(ex_out_mem_size),
+		.out_load_unsigned(ex_out_load_unsigned),
+		.out_mem_addr(ex_out_mem_addr),
+		.out_store_data(ex_out_store_data),
 		.out_is_ebreak(ex_out_is_ebreak),
 		.out_is_trap(ex_out_is_trap),
 		.branch_mispredict,
@@ -269,26 +310,42 @@ module core import common::*;(
 	);
 
 	// MEM
-	logic mem_out_valid, mem_out_reg_write, mem_out_is_ebreak, mem_out_is_trap;
+	logic mem_out_valid, mem_out_reg_write, mem_out_is_load, mem_out_is_store, mem_out_is_ebreak, mem_out_is_trap;
 	u64   mem_out_pc, mem_out_result;
+	u64   mem_out_mem_addr;
 	u32   mem_out_instr;
 	u5    mem_out_rd;
 
 	mem_stage u_mem(
+		.clk,
+		.reset,
+		.flush(wb_is_trap),
 		.in_valid(ex_mem.valid),
 		.in_pc(ex_mem.pc),
 		.in_instr(ex_mem.instr),
 		.in_rd(ex_mem.rd),
 		.in_reg_write(ex_mem.reg_write),
 		.in_result(ex_mem.result),
+		.in_is_load(ex_mem.is_load),
+		.in_is_store(ex_mem.is_store),
+		.in_mem_size(ex_mem.mem_size),
+		.in_load_unsigned(ex_mem.load_unsigned),
+		.in_mem_addr(ex_mem.mem_addr),
+		.in_store_data(ex_mem.store_data),
 		.in_is_ebreak(ex_mem.is_ebreak),
 		.in_is_trap(ex_mem.is_trap),
+		.dreq,
+		.dresp,
+		.mem_wait,
 		.out_valid(mem_out_valid),
 		.out_pc(mem_out_pc),
 		.out_instr(mem_out_instr),
 		.out_rd(mem_out_rd),
 		.out_reg_write(mem_out_reg_write),
 		.out_result(mem_out_result),
+		.out_is_load(mem_out_is_load),
+		.out_is_store(mem_out_is_store),
+		.out_mem_addr(mem_out_mem_addr),
 		.out_is_ebreak(mem_out_is_ebreak),
 		.out_is_trap(mem_out_is_trap)
 	);
@@ -318,23 +375,57 @@ module core import common::*;(
 	);
 
 	// Commit register for Difftest
-	logic commit_valid, commit_wen, commit_is_trap;
-	u64   commit_pc, commit_wdata;
+	logic commit_valid, commit_wen, commit_is_trap, commit_is_mem;
+	u64   commit_pc, commit_wdata, commit_mem_addr;
 	u32   commit_instr;
 	u5    commit_wdest;
+
+`ifndef SYNTHESIS
+	task automatic debug_log_core(
+		input string run_id,
+		input string hypothesis_id,
+		input string location,
+		input string message,
+		input u64 pc,
+		input u64 addr,
+		input u64 extra0,
+		input u64 extra1,
+		input logic flag0,
+		input logic flag1,
+		input logic flag2
+	);
+		integer fd;
+		string payload;
+		begin
+			fd = $fopen("/home/jevonsshi/arch_2026/.cursor/debug-f06466.log", "a");
+			if (fd != 0) begin
+				payload = $sformatf(
+					"{\"sessionId\":\"f06466\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"pc\":\"0x%016h\",\"addr\":\"0x%016h\",\"extra0\":\"0x%016h\",\"extra1\":\"0x%016h\",\"flag0\":%0d,\"flag1\":%0d,\"flag2\":%0d},\"timestamp\":%0t}",
+					run_id, hypothesis_id, location, message, pc, addr, extra0, extra1, flag0, flag1, flag2, $time
+				);
+				$fdisplay(fd, "%s", payload);
+				$fclose(fd);
+			end
+		end
+	endtask
+`endif
 
 	// Pipeline registers update
 	u64 cycle_cnt, instr_cnt;
 	u64 cycle_cnt_n, instr_cnt_n;
 	assign cycle_cnt_n = cycle_cnt + 64'd1;
 	assign instr_cnt_n = instr_cnt + (wb_valid ? 64'd1 : 64'd0);
-
-	logic decode_ok, execute_ok, mem_ok, writeback_ok, step;
-	assign decode_ok    = 1'b1;
-	assign execute_ok   = 1'b1;
-	assign mem_ok       = 1'b1;
-	assign writeback_ok = 1'b1;
-	assign step         = fetch_ok & decode_ok & execute_ok & mem_ok & writeback_ok;
+	logic load_use_hazard;
+	logic load_use_hazard_idex;
+	logic load_use_hazard_exmem;
+	u8    mem_wait_cycles;
+	assign load_use_hazard_idex = if_id.valid && id_ex.valid && id_ex.is_load && (id_ex.rd != 5'd0) &&
+	                              ((dec_use_rs1 && (dec_rs1 == id_ex.rd)) ||
+	                               (dec_use_rs2 && (dec_rs2 == id_ex.rd)));
+	assign load_use_hazard_exmem = if_id.valid && ex_mem.valid && ex_mem.is_load && (ex_mem.rd != 5'd0) &&
+	                               ((dec_use_rs1 && (dec_rs1 == ex_mem.rd)) ||
+	                                (dec_use_rs2 && (dec_rs2 == ex_mem.rd)));
+	assign load_use_hazard = load_use_hazard_idex | load_use_hazard_exmem;
 
 	always_ff @(posedge clk) begin
 		if (reset) begin
@@ -349,12 +440,41 @@ module core import common::*;(
 			commit_wdest <= 5'd0;
 			commit_wdata <= 64'd0;
 			commit_is_trap <= 1'b0;
+			commit_is_mem  <= 1'b0;
+			commit_mem_addr<= 64'd0;
 			cpu_halt     <= 1'b0;
 			cycle_cnt <= 64'd0;
 			instr_cnt <= 64'd0;
+			mem_wait_cycles <= '0;
 		end else begin
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
+			if (mem_wait) begin
+				mem_wait_cycles <= mem_wait_cycles + 8'd1;
+			end else begin
+				mem_wait_cycles <= '0;
+			end
+
+`ifndef SYNTHESIS
+			// #region agent log
+			if (ex_valid && (ex_out_pc >= 64'h0000_0000_8000_0fa8) && (ex_out_pc <= 64'h0000_0000_8000_1020) &&
+			    (ex_out_is_load || ex_out_is_store || id_ex.is_branch || id_ex.is_jal || id_ex.is_jalr)) begin
+				debug_log_core("pre-fix", "H4", "core.sv:exec_window", "execute window around stuck PC",
+				               ex_out_pc, ex_out_mem_addr, id_ex.op1, id_ex.imm,
+				               ex_out_is_load, ex_out_is_store, branch_mispredict);
+			end
+			// #endregion
+`endif
+
+`ifndef SYNTHESIS
+			// #region agent log
+			if (mem_wait && (mem_wait_cycles == 8'd32)) begin
+				debug_log_core("pre-fix", "H1", "core.sv:memwait_long", "mem_wait stayed high for 32 cycles",
+				               ex_mem.pc, ex_mem.mem_addr, {63'd0, dreq.valid}, {62'd0, dresp.data_ok, mem_out_valid},
+				               ex_mem.is_load, ex_mem.is_store, cpu_halt);
+			end
+			// #endregion
+`endif
 
 			// commit 寄存：将 WB 提交点打一拍后提供给 Difftest
 			commit_valid   <= wb_valid & !cpu_halt;
@@ -364,6 +484,17 @@ module core import common::*;(
 			commit_wdest   <= wb_wdest;
 			commit_wdata   <= wb_wdata;
 			commit_is_trap <= wb_is_trap;
+			commit_is_mem  <= mem_wb.valid & (mem_wb.is_load | mem_wb.is_store);
+			commit_mem_addr<= mem_wb.mem_addr;
+
+`ifndef SYNTHESIS
+			// #region agent log
+			if (wb_is_trap || cpu_halt) begin
+				debug_log_core("pre-fix", "H5", "core.sv:trap_or_halt", "trap or halt reached in WB path",
+				               wb_pc, mem_wb.mem_addr, cycle_cnt, instr_cnt, wb_is_trap, cpu_halt, wb_valid);
+			end
+			// #endregion
+`endif
 
 			if (wb_is_trap) begin
 				// trap 指令在 WB 到达后，下一周期彻底停机，避免继续提交
@@ -372,7 +503,30 @@ module core import common::*;(
 				id_ex.valid <= 1'b0;
 				ex_mem.valid<= 1'b0;
 				mem_wb.valid<= 1'b0;
+			end else if (mem_wait) begin
+				// 访存未完成：冻结前级，避免重复发射与乱序提交
+				mem_wb.valid <= 1'b0;
 			end else begin
+`ifndef SYNTHESIS
+				// #region agent log
+				if (branch_mispredict) begin
+					debug_log_core("pre-fix", "H3", "core.sv:branch_flush", "execute reported branch mispredict",
+					               ex_out_pc, branch_correct_pc, id_ex.pred_target, ex_out_mem_addr,
+					               id_ex.pred_taken, ex_valid, ex_out_is_store);
+				end
+				// #endregion
+`endif
+
+`ifndef SYNTHESIS
+				// #region agent log
+				if (load_use_hazard && ex_valid) begin
+					debug_log_core("pre-fix", "H2", "core.sv:hazard_overlap", "load-use hazard overlapped with EX advance",
+					               if_id.pc, ex_mem.mem_addr, id_ex.pc, ex_out_mem_addr,
+					               load_use_hazard_idex, load_use_hazard_exmem, ex_valid);
+				end
+				// #endregion
+`endif
+
 				// WB pipeline register
 				mem_wb.valid    <= mem_out_valid;
 				mem_wb.pc       <= mem_out_pc;
@@ -380,6 +534,9 @@ module core import common::*;(
 				mem_wb.rd       <= mem_out_rd;
 				mem_wb.reg_write<= mem_out_reg_write;
 				mem_wb.result   <= mem_out_result;
+				mem_wb.is_load  <= mem_out_is_load;
+				mem_wb.is_store <= mem_out_is_store;
+				mem_wb.mem_addr <= mem_out_mem_addr;
 				mem_wb.is_ebreak<= mem_out_is_ebreak;
 				mem_wb.is_trap  <= mem_out_is_trap;
 
@@ -390,6 +547,12 @@ module core import common::*;(
 				ex_mem.rd        <= ex_out_rd;
 				ex_mem.reg_write <= ex_out_reg_write;
 				ex_mem.result    <= ex_out_result;
+				ex_mem.is_load   <= ex_out_is_load;
+				ex_mem.is_store  <= ex_out_is_store;
+				ex_mem.mem_size  <= ex_out_mem_size;
+				ex_mem.load_unsigned <= ex_out_load_unsigned;
+				ex_mem.mem_addr  <= ex_out_mem_addr;
+				ex_mem.store_data<= ex_out_store_data;
 				ex_mem.is_ebreak <= ex_out_is_ebreak;
 				ex_mem.is_trap   <= ex_out_is_trap;
 
@@ -397,6 +560,9 @@ module core import common::*;(
 					// 冲刷水线中所有年轻指令
 					if_id.valid <= 1'b0;
 					id_ex.valid <= 1'b0;
+				end else if (load_use_hazard) begin
+					// load-use：插入一个气泡，等待 load 结果到 MEM/WB 可前递
+					id_ex <= '0;
 				end else begin
 					// ID/EX
 					id_ex.valid      <= if_id.valid;
@@ -406,13 +572,20 @@ module core import common::*;(
 					id_ex.rs1        <= dec_rs1;
 					id_ex.rs2        <= dec_rs2;
 					id_ex.op1        <= id_op1_pre;
-					id_ex.op2        <= id_alu_op2;
+					id_ex.rs2_val    <= id_rs2_pre;
 					id_ex.imm        <= dec_imm;
 					id_ex.reg_write  <= dec_reg_write;
+					id_ex.is_imm     <= dec_is_imm;
 					id_ex.is_word    <= dec_is_word;
 					id_ex.is_branch  <= dec_is_branch;
 					id_ex.is_jal     <= dec_is_jal;
 					id_ex.is_jalr    <= dec_is_jalr;
+					id_ex.is_auipc   <= dec_is_auipc;
+					id_ex.is_lui     <= dec_is_lui;
+					id_ex.is_load    <= dec_is_load;
+					id_ex.is_store   <= dec_is_store;
+					id_ex.mem_size   <= dec_mem_size;
+					id_ex.load_unsigned <= dec_load_unsigned;
 					id_ex.is_ebreak  <= dec_is_ebreak;
 					id_ex.is_trap    <= dec_is_trap;
 					id_ex.is_muldiv  <= dec_is_muldiv;
@@ -434,13 +607,7 @@ module core import common::*;(
 		end
 	end
 
-	// 现在还没实现 dcache 通路
-	assign dreq.valid  = 1'b0;
-	assign dreq.addr   = 64'd0;
-	assign dreq.size   = MSIZE8;
-	assign dreq.strobe = 8'd0;
-	assign dreq.data   = 64'd0;
-	`UNUSED_OK({dresp, trint, swint, exint, step, wb_is_ebreak, rf_next_reg[0]})
+	`UNUSED_OK({trint, swint, exint, fetch_ok, wb_is_ebreak, rf_next_reg[0]})
 
 `ifdef VERILATOR
 	DifftestInstrCommit DifftestInstrCommit(
@@ -450,7 +617,7 @@ module core import common::*;(
 		.valid              (commit_valid),
 		.pc                 (commit_pc),
 		.instr              (commit_instr),
-		.skip               (0),
+		.skip               (commit_is_mem && (commit_mem_addr[31] == 1'b0)),
 		.isRVC              (0),
 		.scFailed           (0),
 		.wen                (commit_wen),

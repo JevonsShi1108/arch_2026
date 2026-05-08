@@ -20,6 +20,12 @@ module decode import common::*;(
     output logic is_branch,
     output logic is_jal,
     output logic is_jalr,
+    output logic is_auipc,
+    output logic is_lui,
+    output logic is_load,
+    output logic is_store,
+    output msize_t mem_size,
+    output logic load_unsigned,
     output logic is_ebreak,
     output logic is_trap,
     output logic is_muldiv,
@@ -31,14 +37,21 @@ module decode import common::*;(
     localparam u4 ALU_AND = 4'd2;
     localparam u4 ALU_OR  = 4'd3;
     localparam u4 ALU_XOR = 4'd4;
+    localparam u4 ALU_SLL = 4'd5;
+    localparam u4 ALU_SRL = 4'd6;
+    localparam u4 ALU_SRA = 4'd7;
+    localparam u4 ALU_SLT = 4'd8;
+    localparam u4 ALU_SLTU= 4'd9;
 
     logic [6:0] opcode;
     logic [2:0] funct3;
     logic [6:0] funct7;
 
     u64 imm_i;
+    u64 imm_s;
     u64 imm_b;
     u64 imm_j;
+    u64 imm_u;
 
     assign opcode = instr[6:0];
     assign funct3 = instr[14:12];
@@ -49,8 +62,10 @@ module decode import common::*;(
     assign rd  = instr[11:7];
 
     assign imm_i = {{52{instr[31]}}, instr[31:20]};
+    assign imm_s = {{52{instr[31]}}, instr[31:25], instr[11:7]};
     assign imm_b = {{51{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
     assign imm_j = {{43{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+    assign imm_u = {{32{instr[31]}}, instr[31:12], 12'b0};
 
     always_comb begin
         use_rs1   = 1'b0;
@@ -61,6 +76,12 @@ module decode import common::*;(
         is_branch = 1'b0;
         is_jal    = 1'b0;
         is_jalr   = 1'b0;
+        is_auipc  = 1'b0;
+        is_lui    = 1'b0;
+        is_load   = 1'b0;
+        is_store  = 1'b0;
+        mem_size  = MSIZE8;
+        load_unsigned = 1'b0;
         is_ebreak = 1'b0;
         is_trap   = 1'b0;
         is_muldiv = 1'b0;
@@ -76,6 +97,24 @@ module decode import common::*;(
                 imm       = imm_i;
                 unique case (funct3)
                     3'b000: alu_op = ALU_ADD; // addi
+                    3'b001: begin // slli
+                        if (instr[31:26] == 6'b000000) begin
+                            alu_op = ALU_SLL;
+                        end else begin
+                            reg_write = 1'b0;
+                        end
+                    end
+                    3'b010: alu_op = ALU_SLT;  // slti
+                    3'b011: alu_op = ALU_SLTU; // sltiu
+                    3'b101: begin // srli/srai
+                        if (instr[31:26] == 6'b000000) begin
+                            alu_op = ALU_SRL;
+                        end else if (instr[31:26] == 6'b010000) begin
+                            alu_op = ALU_SRA;
+                        end else begin
+                            reg_write = 1'b0;
+                        end
+                    end
                     3'b100: alu_op = ALU_XOR; // xori
                     3'b110: alu_op = ALU_OR;  // ori
                     3'b111: alu_op = ALU_AND; // andi
@@ -90,9 +129,28 @@ module decode import common::*;(
                 is_imm    = 1'b1;
                 is_word   = 1'b1;
                 imm       = imm_i;
-                if (funct3 != 3'b000) begin
-                    reg_write = 1'b0;
-                end
+                unique case (funct3)
+                    3'b000: alu_op = ALU_ADD; // addiw
+                    3'b001: begin // slliw
+                        if (funct7 == 7'b0000000) begin
+                            alu_op = ALU_SLL;
+                        end else begin
+                            reg_write = 1'b0;
+                        end
+                    end
+                    3'b101: begin // srliw/sraiw
+                        if (funct7 == 7'b0000000) begin
+                            alu_op = ALU_SRL;
+                        end else if (funct7 == 7'b0100000) begin
+                            alu_op = ALU_SRA;
+                        end else begin
+                            reg_write = 1'b0;
+                        end
+                    end
+                    default: begin
+                        reg_write = 1'b0;
+                    end
+                endcase
             end
             7'b0110011: begin // OP
                 use_rs1   = 1'b1;
@@ -104,6 +162,11 @@ module decode import common::*;(
                     {7'b0000000, 3'b111}: alu_op = ALU_AND; // and
                     {7'b0000000, 3'b110}: alu_op = ALU_OR;  // or
                     {7'b0000000, 3'b100}: alu_op = ALU_XOR; // xor
+                    {7'b0000000, 3'b001}: alu_op = ALU_SLL; // sll
+                    {7'b0000000, 3'b101}: alu_op = ALU_SRL; // srl
+                    {7'b0100000, 3'b101}: alu_op = ALU_SRA; // sra
+                    {7'b0000000, 3'b010}: alu_op = ALU_SLT; // slt
+                    {7'b0000000, 3'b011}: alu_op = ALU_SLTU;// sltu
                     default: begin
                         // TODO: 之后在这里接入 M 扩展 mul/div/rem 指令译码
                         // mul/div/divu/rem/remu
@@ -122,6 +185,9 @@ module decode import common::*;(
                 unique case ({funct7, funct3})
                     {7'b0000000, 3'b000}: alu_op = ALU_ADD; // addw
                     {7'b0100000, 3'b000}: alu_op = ALU_SUB; // subw
+                    {7'b0000000, 3'b001}: alu_op = ALU_SLL; // sllw
+                    {7'b0000000, 3'b101}: alu_op = ALU_SRL; // srlw
+                    {7'b0100000, 3'b101}: alu_op = ALU_SRA; // sraw
                     default: begin
                         // TODO: 之后在这里接入 M 扩展 32 位指令译码
                         // mulw/divw/divuw/remw/remuw
@@ -149,15 +215,62 @@ module decode import common::*;(
                 is_jalr   = 1'b1;
                 imm       = imm_i;
             end
+            7'b0110111: begin // LUI
+                reg_write = 1'b1;
+                is_lui    = 1'b1;
+                is_imm    = 1'b1;
+                imm       = imm_u;
+            end
+            7'b0010111: begin // AUIPC
+                reg_write = 1'b1;
+                is_auipc  = 1'b1;
+                is_imm    = 1'b1;
+                imm       = imm_u;
+            end
+            7'b0000011: begin // LOAD
+                use_rs1   = 1'b1;
+                reg_write = 1'b1;
+                is_imm    = 1'b1;
+                is_load   = 1'b1;
+                imm       = imm_i;
+                unique case (funct3)
+                    3'b000: begin mem_size = MSIZE1; load_unsigned = 1'b0; end // lb
+                    3'b001: begin mem_size = MSIZE2; load_unsigned = 1'b0; end // lh
+                    3'b010: begin mem_size = MSIZE4; load_unsigned = 1'b0; end // lw
+                    3'b011: begin mem_size = MSIZE8; load_unsigned = 1'b0; end // ld
+                    3'b100: begin mem_size = MSIZE1; load_unsigned = 1'b1; end // lbu
+                    3'b101: begin mem_size = MSIZE2; load_unsigned = 1'b1; end // lhu
+                    3'b110: begin mem_size = MSIZE4; load_unsigned = 1'b1; end // lwu
+                    default: begin
+                        reg_write = 1'b0;
+                        is_load   = 1'b0;
+                    end
+                endcase
+            end
+            7'b0100011: begin // STORE
+                use_rs1   = 1'b1;
+                use_rs2   = 1'b1;
+                is_imm    = 1'b1;
+                is_store  = 1'b1;
+                imm       = imm_s;
+                unique case (funct3)
+                    3'b000: mem_size = MSIZE1; // sb
+                    3'b001: mem_size = MSIZE2; // sh
+                    3'b010: mem_size = MSIZE4; // sw
+                    3'b011: mem_size = MSIZE8; // sd
+                    default: begin
+                        is_store = 1'b0;
+                    end
+                endcase
+            end
             7'b1110011: begin
-                // ebreak: 0x00100073
                 if (instr == 32'h00100073) begin
                     is_ebreak = 1'b1;
                     is_trap   = 1'b1;
                 end
             end
             7'b1101011: begin
-                // Lab1 结束指令（nemu_trap），例如 0x0005006b
+                // Lab1 结束指令（nemu_trap）
                 is_trap = 1'b1;
             end
             default: begin
@@ -165,6 +278,7 @@ module decode import common::*;(
             end
         endcase
     end
+    `UNUSED_OK(pc)
 endmodule
 
 `endif
