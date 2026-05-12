@@ -29,6 +29,11 @@ module decode import common::*;(
     output logic is_ebreak,
     output logic is_trap,
     output logic is_muldiv,
+    output logic is_csr,
+    output u12   csr_addr,
+    output u2    csr_op,
+    output logic csr_use_imm,
+    output logic csr_we_intent,
     output u3    br_funct3,
     output u4    alu_op
 );
@@ -42,6 +47,10 @@ module decode import common::*;(
     localparam u4 ALU_SRA = 4'd7;
     localparam u4 ALU_SLT = 4'd8;
     localparam u4 ALU_SLTU= 4'd9;
+    localparam u2 CSR_OP_NONE  = 2'd0;
+    localparam u2 CSR_OP_WRITE = 2'd1;
+    localparam u2 CSR_OP_SET   = 2'd2;
+    localparam u2 CSR_OP_CLEAR = 2'd3;
 
     logic [6:0] opcode;
     logic [2:0] funct3;
@@ -85,6 +94,11 @@ module decode import common::*;(
         is_ebreak = 1'b0;
         is_trap   = 1'b0;
         is_muldiv = 1'b0;
+        is_csr    = 1'b0;
+        csr_addr  = 12'd0;
+        csr_op    = CSR_OP_NONE;
+        csr_use_imm = 1'b0;
+        csr_we_intent = 1'b0;
         br_funct3 = funct3;
         alu_op    = ALU_ADD;
         imm       = 64'd0;
@@ -264,9 +278,51 @@ module decode import common::*;(
                 endcase
             end
             7'b1110011: begin
-                if (instr == 32'h00100073) begin
-                    is_ebreak = 1'b1;
-                    is_trap   = 1'b1;
+                if (funct3 == 3'b000) begin
+                    if (instr == 32'h00100073) begin
+                        is_ebreak = 1'b1;
+                        is_trap   = 1'b1;
+                    end
+                end else begin
+                    is_csr      = 1'b1;
+                    reg_write   = 1'b1;
+                    csr_addr    = instr[31:20];
+                    csr_use_imm = funct3[2];
+                    unique case (funct3)
+                        3'b001: begin // csrrw
+                            use_rs1       = 1'b1;
+                            csr_op        = CSR_OP_WRITE;
+                            csr_we_intent = 1'b1;
+                        end
+                        3'b010: begin // csrrs
+                            use_rs1       = 1'b1;
+                            csr_op        = CSR_OP_SET;
+                            csr_we_intent = (rs1 != 5'd0);
+                        end
+                        3'b011: begin // csrrc
+                            use_rs1       = 1'b1;
+                            csr_op        = CSR_OP_CLEAR;
+                            csr_we_intent = (rs1 != 5'd0);
+                        end
+                        3'b101: begin // csrrwi
+                            csr_op        = CSR_OP_WRITE;
+                            csr_we_intent = 1'b1;
+                        end
+                        3'b110: begin // csrrsi
+                            csr_op        = CSR_OP_SET;
+                            csr_we_intent = (instr[19:15] != 5'd0);
+                        end
+                        3'b111: begin // csrrci
+                            csr_op        = CSR_OP_CLEAR;
+                            csr_we_intent = (instr[19:15] != 5'd0);
+                        end
+                        default: begin
+                            is_csr      = 1'b0;
+                            reg_write   = 1'b0;
+                            csr_op      = CSR_OP_NONE;
+                            csr_we_intent = 1'b0;
+                        end
+                    endcase
                 end
             end
             7'b1101011: begin

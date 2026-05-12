@@ -3,6 +3,7 @@
 
 `ifdef VERILATOR
 `include "include/common.sv"
+`include "include/csr.sv"
 `include "src/predictor_static.sv"
 `include "src/regfile.sv"
 `include "src/muldiv_stub.sv"
@@ -13,7 +14,7 @@
 `include "src/writeback.sv"
 `endif
 
-module core import common::*;(
+module core import common::*; import csr_pkg::*;(
 	input  logic       clk, reset,
 	output ibus_req_t  ireq,
 	input  ibus_resp_t iresp,
@@ -52,6 +53,11 @@ module core import common::*;(
 		logic is_ebreak;
 		logic is_trap;
 		logic is_muldiv;
+		logic is_csr;
+		u12   csr_addr;
+		u2    csr_op;
+		logic csr_use_imm;
+		logic csr_we_intent;
 		u3    br_funct3;
 		u4    alu_op;
 		logic pred_taken;
@@ -73,6 +79,11 @@ module core import common::*;(
 		u64   store_data;
 		logic is_ebreak;
 		logic is_trap;
+		logic is_csr;
+		logic csr_we;
+		u12   csr_addr;
+		u64   csr_old_data;
+		u64   csr_new_data;
 	} ex_mem_t;
 
 	typedef struct packed {
@@ -87,6 +98,11 @@ module core import common::*;(
 		u64   mem_addr;
 		logic is_ebreak;
 		logic is_trap;
+		logic is_csr;
+		logic csr_we;
+		u12   csr_addr;
+		u64   csr_old_data;
+		u64   csr_new_data;
 	} mem_wb_t;
 
 	localparam u4 ALU_ADD = 4'd0;
@@ -94,6 +110,10 @@ module core import common::*;(
 	localparam u4 ALU_AND = 4'd2;
 	localparam u4 ALU_OR  = 4'd3;
 	localparam u4 ALU_XOR = 4'd4;
+	localparam u2 CSR_OP_NONE  = 2'd0;
+	localparam u2 CSR_OP_WRITE = 2'd1;
+	localparam u2 CSR_OP_SET   = 2'd2;
+	localparam u2 CSR_OP_CLEAR = 2'd3;
 
 	if_id_t  if_id;
 	id_ex_t  id_ex;
@@ -108,15 +128,82 @@ module core import common::*;(
 	u32   fetch_instr;
 	logic branch_mispredict;
 	u64   branch_correct_pc;
+	logic csr_redirect_valid;
+	u64   csr_redirect_pc;
+	logic redirect_valid;
+	u64   redirect_pc;
 	logic cpu_halt;
 	logic mem_wait;
+	u64   csr_mstatus, csr_mtvec, csr_mip, csr_mie;
+	u64   csr_mscratch, csr_mcause, csr_mtval, csr_mepc;
+	u64   csr_mcycle, csr_satp;
+	u64   csr_mhartid;
+
+	function automatic u64 csr_read_data(
+		input u12 csr_addr_i,
+		input u64 mstatus_i,
+		input u64 mtvec_i,
+		input u64 mip_i,
+		input u64 mie_i,
+		input u64 mscratch_i,
+		input u64 mcause_i,
+		input u64 mtval_i,
+		input u64 mepc_i,
+		input u64 mcycle_i,
+		input u64 mhartid_i,
+		input u64 satp_i
+	);
+		begin
+			unique case (csr_addr_i)
+				CSR_MSTATUS:  csr_read_data = mstatus_i & MSTATUS_MASK;
+				CSR_MTVEC:    csr_read_data = mtvec_i & MTVEC_MASK;
+				CSR_MIP:      csr_read_data = mip_i & MIP_MASK;
+				CSR_MIE:      csr_read_data = mie_i;
+				CSR_MSCRATCH: csr_read_data = mscratch_i;
+				CSR_MCAUSE:   csr_read_data = mcause_i;
+				CSR_MTVAL:    csr_read_data = mtval_i;
+				CSR_MEPC:     csr_read_data = mepc_i;
+				CSR_MCYCLE:   csr_read_data = mcycle_i;
+				CSR_MHARTID:  csr_read_data = mhartid_i;
+				CSR_SATP:     csr_read_data = satp_i;
+				default:      csr_read_data = 64'd0;
+			endcase
+		end
+	endfunction
+
+	function automatic u64 csr_apply_mask(
+		input u12 csr_addr_i,
+		input u64 old_val_i,
+		input u64 cand_val_i
+	);
+		begin
+			unique case (csr_addr_i)
+				CSR_MSTATUS:  csr_apply_mask = (old_val_i & ~MSTATUS_MASK) | (cand_val_i & MSTATUS_MASK);
+				CSR_MTVEC:    csr_apply_mask = (old_val_i & ~MTVEC_MASK) | (cand_val_i & MTVEC_MASK);
+				CSR_MIP:      csr_apply_mask = (old_val_i & ~MIP_MASK) | (cand_val_i & MIP_MASK);
+				CSR_MIE:      csr_apply_mask = cand_val_i;
+				CSR_MHARTID:  csr_apply_mask = old_val_i;
+				CSR_MSCRATCH,
+				CSR_MCAUSE,
+				CSR_MTVAL,
+				CSR_MEPC,
+				CSR_MCYCLE,
+				CSR_SATP:     csr_apply_mask = cand_val_i;
+				default:      csr_apply_mask = old_val_i;
+			endcase
+		end
+	endfunction
+
+	assign csr_mhartid = 64'd0;
+	assign redirect_valid = csr_redirect_valid | branch_mispredict;
+	assign redirect_pc = csr_redirect_valid ? csr_redirect_pc : branch_correct_pc;
 
 	fetch u_fetch(
 		.clk,
 		.reset,
 		.stop_fetch(cpu_halt | mem_wait),
-		.redirect_valid(branch_mispredict),
-		.redirect_pc(branch_correct_pc),
+		.redirect_valid(redirect_valid),
+		.redirect_pc(redirect_pc),
 		.fetch_ok,
 		.fetch_valid,
 		.fetch_stale,
@@ -134,6 +221,9 @@ module core import common::*;(
 	msize_t dec_mem_size;
 	logic dec_load_unsigned;
 	logic dec_is_ebreak, dec_is_trap, dec_is_muldiv;
+	logic dec_is_csr, dec_csr_use_imm, dec_csr_we_intent;
+	u12   dec_csr_addr;
+	u2    dec_csr_op;
 	u3    dec_br_funct3;
 	u4    dec_alu_op;
 	logic dec_pred_taken;
@@ -163,6 +253,11 @@ module core import common::*;(
 		.is_ebreak(dec_is_ebreak),
 		.is_trap(dec_is_trap),
 		.is_muldiv(dec_is_muldiv),
+		.is_csr(dec_is_csr),
+		.csr_addr(dec_csr_addr),
+		.csr_op(dec_csr_op),
+		.csr_use_imm(dec_csr_use_imm),
+		.csr_we_intent(dec_csr_we_intent),
 		.br_funct3(dec_br_funct3),
 		.alu_op(dec_alu_op)
 	);
@@ -309,6 +404,45 @@ module core import common::*;(
 		.branch_correct_pc
 	);
 
+	u64   ex_csr_src_data;
+	u64   ex_csr_old_data;
+	u64   ex_csr_candidate_new;
+	u64   ex_csr_new_data;
+	logic ex_csr_we;
+	u64   ex_result_final;
+
+	assign ex_csr_src_data = id_ex.csr_use_imm ? {59'd0, id_ex.rs1} : id_ex.op1;
+	assign ex_csr_old_data = csr_read_data(
+		id_ex.csr_addr,
+		csr_mstatus,
+		csr_mtvec,
+		csr_mip,
+		csr_mie,
+		csr_mscratch,
+		csr_mcause,
+		csr_mtval,
+		csr_mepc,
+		csr_mcycle,
+		csr_mhartid,
+		csr_satp
+	);
+
+	always_comb begin
+		ex_csr_candidate_new = ex_csr_old_data;
+		unique case (id_ex.csr_op)
+			CSR_OP_WRITE: ex_csr_candidate_new = ex_csr_src_data;
+			CSR_OP_SET:   ex_csr_candidate_new = ex_csr_old_data | ex_csr_src_data;
+			CSR_OP_CLEAR: ex_csr_candidate_new = ex_csr_old_data & ~ex_csr_src_data;
+			default:      ex_csr_candidate_new = ex_csr_old_data;
+		endcase
+	end
+
+	assign ex_csr_new_data = csr_apply_mask(id_ex.csr_addr, ex_csr_old_data, ex_csr_candidate_new);
+	assign ex_csr_we = id_ex.valid & id_ex.is_csr & id_ex.csr_we_intent & (id_ex.csr_addr != CSR_MHARTID);
+	assign ex_result_final = id_ex.is_csr ? ex_csr_old_data : ex_out_result;
+	assign csr_redirect_valid = ex_csr_we;
+	assign csr_redirect_pc = id_ex.pc + 64'd4;
+
 	// MEM
 	logic mem_out_valid, mem_out_reg_write, mem_out_is_load, mem_out_is_store, mem_out_is_ebreak, mem_out_is_trap;
 	u64   mem_out_pc, mem_out_result;
@@ -446,13 +580,40 @@ module core import common::*;(
 			cycle_cnt <= 64'd0;
 			instr_cnt <= 64'd0;
 			mem_wait_cycles <= '0;
+			csr_mstatus  <= 64'd0;
+			csr_mtvec    <= 64'd0;
+			csr_mip      <= 64'd0;
+			csr_mie      <= 64'd0;
+			csr_mscratch <= 64'd0;
+			csr_mcause   <= 64'd0;
+			csr_mtval    <= 64'd0;
+			csr_mepc     <= 64'd0;
+			csr_mcycle   <= 64'd0;
+			csr_satp     <= 64'd0;
 		end else begin
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
+			csr_mcycle <= csr_mcycle + 64'd1;
 			if (mem_wait) begin
 				mem_wait_cycles <= mem_wait_cycles + 8'd1;
 			end else begin
 				mem_wait_cycles <= '0;
+			end
+			if (mem_wb.valid && mem_wb.is_csr && mem_wb.csr_we) begin
+				unique case (mem_wb.csr_addr)
+					CSR_MSTATUS:  csr_mstatus  <= mem_wb.csr_new_data;
+					CSR_MTVEC:    csr_mtvec    <= mem_wb.csr_new_data;
+					CSR_MIP:      csr_mip      <= mem_wb.csr_new_data;
+					CSR_MIE:      csr_mie      <= mem_wb.csr_new_data;
+					CSR_MSCRATCH: csr_mscratch <= mem_wb.csr_new_data;
+					CSR_MCAUSE:   csr_mcause   <= mem_wb.csr_new_data;
+					CSR_MTVAL:    csr_mtval    <= mem_wb.csr_new_data;
+					CSR_MEPC:     csr_mepc     <= mem_wb.csr_new_data;
+					CSR_MCYCLE:   csr_mcycle   <= mem_wb.csr_new_data;
+					CSR_SATP:     csr_satp     <= mem_wb.csr_new_data;
+					default: begin
+					end
+				endcase
 			end
 
 `ifndef SYNTHESIS
@@ -539,6 +700,11 @@ module core import common::*;(
 				mem_wb.mem_addr <= mem_out_mem_addr;
 				mem_wb.is_ebreak<= mem_out_is_ebreak;
 				mem_wb.is_trap  <= mem_out_is_trap;
+				mem_wb.is_csr   <= ex_mem.is_csr;
+				mem_wb.csr_we   <= ex_mem.csr_we;
+				mem_wb.csr_addr <= ex_mem.csr_addr;
+				mem_wb.csr_old_data <= ex_mem.csr_old_data;
+				mem_wb.csr_new_data <= ex_mem.csr_new_data;
 
 				// MEM pipeline register
 				ex_mem.valid     <= ex_valid;
@@ -546,7 +712,7 @@ module core import common::*;(
 				ex_mem.instr     <= ex_out_instr;
 				ex_mem.rd        <= ex_out_rd;
 				ex_mem.reg_write <= ex_out_reg_write;
-				ex_mem.result    <= ex_out_result;
+				ex_mem.result    <= ex_result_final;
 				ex_mem.is_load   <= ex_out_is_load;
 				ex_mem.is_store  <= ex_out_is_store;
 				ex_mem.mem_size  <= ex_out_mem_size;
@@ -555,8 +721,13 @@ module core import common::*;(
 				ex_mem.store_data<= ex_out_store_data;
 				ex_mem.is_ebreak <= ex_out_is_ebreak;
 				ex_mem.is_trap   <= ex_out_is_trap;
+				ex_mem.is_csr    <= id_ex.is_csr;
+				ex_mem.csr_we    <= ex_csr_we;
+				ex_mem.csr_addr  <= id_ex.csr_addr;
+				ex_mem.csr_old_data <= ex_csr_old_data;
+				ex_mem.csr_new_data <= ex_csr_new_data;
 
-				if (branch_mispredict) begin
+				if (branch_mispredict || csr_redirect_valid) begin
 					// 冲刷水线中所有年轻指令
 					if_id.valid <= 1'b0;
 					id_ex.valid <= 1'b0;
@@ -589,6 +760,11 @@ module core import common::*;(
 					id_ex.is_ebreak  <= dec_is_ebreak;
 					id_ex.is_trap    <= dec_is_trap;
 					id_ex.is_muldiv  <= dec_is_muldiv;
+					id_ex.is_csr     <= dec_is_csr;
+					id_ex.csr_addr   <= dec_csr_addr;
+					id_ex.csr_op     <= dec_csr_op;
+					id_ex.csr_use_imm<= dec_csr_use_imm;
+					id_ex.csr_we_intent <= dec_csr_we_intent;
 					id_ex.br_funct3  <= dec_br_funct3;
 					id_ex.alu_op     <= dec_alu_op;
 					id_ex.pred_taken <= dec_pred_taken;
@@ -612,7 +788,7 @@ module core import common::*;(
 `ifdef VERILATOR
 	DifftestInstrCommit DifftestInstrCommit(
 		.clock              (clk),
-		.coreid             (0),
+		.coreid             (csr_mhartid[7:0]),
 		.index              (0),
 		.valid              (commit_valid),
 		.pc                 (commit_pc),
@@ -627,7 +803,7 @@ module core import common::*;(
 
 	DifftestArchIntRegState DifftestArchIntRegState (
 		.clock              (clk),
-		.coreid             (0),
+		.coreid             (csr_mhartid[7:0]),
 		.gpr_0              (rf_reg_state[0]),
 		.gpr_1              (rf_reg_state[1]),
 		.gpr_2              (rf_reg_state[2]),
@@ -664,7 +840,7 @@ module core import common::*;(
 
     DifftestTrapEvent DifftestTrapEvent(
 		.clock              (clk),
-		.coreid             (0),
+		.coreid             (csr_mhartid[7:0]),
 		.valid              (commit_valid & commit_is_trap),
 		.code               (rf_reg_state[10][2:0]),
 		.pc                 (commit_pc),
@@ -674,22 +850,22 @@ module core import common::*;(
 
 	DifftestCSRState DifftestCSRState(
 		.clock              (clk),
-		.coreid             (0),
-		.priviledgeMode     (3),
-		.mstatus            (0),
-		.sstatus            (0 /* mstatus & SSTATUS_MASK */),
-		.mepc               (0),
+		.coreid             (csr_mhartid[7:0]),
+		.priviledgeMode     (2'd3),
+		.mstatus            (csr_mstatus & MSTATUS_MASK),
+		.sstatus            (csr_mstatus & SSTATUS_MASK),
+		.mepc               (csr_mepc),
 		.sepc               (0),
-		.mtval              (0),
+		.mtval              (csr_mtval),
 		.stval              (0),
-		.mtvec              (0),
+		.mtvec              (csr_mtvec & MTVEC_MASK),
 		.stvec              (0),
-		.mcause             (0),
+		.mcause             (csr_mcause),
 		.scause             (0),
-		.satp               (0),
-		.mip                (0),
-		.mie                (0),
-		.mscratch           (0),
+		.satp               (csr_satp),
+		.mip                (csr_mip & MIP_MASK),
+		.mie                (csr_mie),
+		.mscratch           (csr_mscratch),
 		.sscratch           (0),
 		.mideleg            (0),
 		.medeleg            (0)
