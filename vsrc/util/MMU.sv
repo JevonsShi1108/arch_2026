@@ -37,6 +37,8 @@ module MMU import common::*;(
     u64 pte_addr_q;
     u64 pte_data_q;
     u64 phys_addr_q;
+    u2  priv_mode_q;
+    u64 satp_q;
 
     logic translate_en;
     logic dn_done;
@@ -143,11 +145,15 @@ module MMU import common::*;(
             pte_addr_q <= 64'd0;
             pte_data_q <= 64'd0;
             phys_addr_q <= 64'd0;
+            priv_mode_q <= PRV_M;
+            satp_q <= 64'd0;
         end else begin
             unique case (state)
                 MMU_IDLE: begin
                     if (up_req.valid) begin
                         req_q <= up_req;
+                        priv_mode_q <= priv_mode;
+                        satp_q <= satp;
                         if (translate_en) begin
                             pte_addr_q <= make_pte_addr(satp[43:0], up_req.addr[38:30]);
                             state <= MMU_PTW_L2;
@@ -183,9 +189,9 @@ module MMU import common::*;(
                     if (dn_done) begin
                         pte_data_q <= dn_resp.data;
                         if (pte_is_leaf(dn_resp.data)) begin
-                            if (req_q.is_fetch ? pte_allow_fetch(dn_resp.data, priv_mode) :
-                                (req_q.is_write ? pte_allow_store(dn_resp.data, priv_mode)
-                                                : pte_allow_load(dn_resp.data, priv_mode))) begin
+                            if (req_q.is_fetch ? pte_allow_fetch(dn_resp.data, priv_mode_q) :
+                                (req_q.is_write ? pte_allow_store(dn_resp.data, priv_mode_q)
+                                                : pte_allow_load(dn_resp.data, priv_mode_q))) begin
                                 phys_addr_q <= {8'd0, dn_resp.data[53:10], req_q.addr[11:0]};
                                 state <= MMU_FINAL_REQ;
                             end else begin
@@ -213,7 +219,7 @@ module MMU import common::*;(
         end
     end
 
-    `UNUSED_OK(pte_data_q)
+    `UNUSED_OK({pte_data_q, satp_q})
 endmodule
 
 `endif
