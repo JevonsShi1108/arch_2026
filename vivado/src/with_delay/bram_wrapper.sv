@@ -55,10 +55,21 @@ module bram_wrapper #(
 
 	logic ready_read, ready_write;
 	logic last_read, last_write;
+	logic ready_read_d1, last_read_d1;
 
 	always_ff @(posedge clk) begin
-		ready_read <= ready_write;
-		last_read <= last_write;
+		if (reset) begin
+			ready_read_d1 <= '0;
+			last_read_d1  <= '0;
+			ready_read    <= '0;
+			last_read     <= '0;
+		end else begin
+			// Read path: delay one extra cycle so ready/last align with BRAM douta.
+			ready_read_d1 <= ready_write;
+			last_read_d1  <= last_write;
+			ready_read    <= ready_read_d1;
+			last_read     <= last_read_d1;
+		end
 	end
 
 	assign ready_write = real_valid;
