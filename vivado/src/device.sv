@@ -74,7 +74,8 @@ module device #(
 				rdata = cnter;
 			end
 			TX_READY: begin
-				rdata = {63'b0, tx_ready};
+				// xv6 uartputc polls bit3 (0x8): 1 = busy, 0 = ready to accept
+				rdata = {60'b0, ~tx_ready, 3'b0};
 			end
 			default: begin
 				
@@ -123,21 +124,29 @@ module device #(
     logic [7:0] char_data;
     logic tx_ready;
 
+    // One UART launch per CBus valid episode (valid may stay high across bit TX).
+    logic tx_store;
+    logic tx_acked;
+    logic tx_store_launch;
+
+    assign tx_store       = valid && wvalid && (addr == TX_DATA);
+    assign tx_store_launch = tx_store && tx_ready && !tx_acked;
+
+    always_ff @(posedge clk) begin
+        if (reset || !valid)
+            tx_acked <= 1'b0;
+        else if (tx_store && tx_ready)
+            tx_acked <= 1'b1;
+    end
+
     wire [15:0][7:0] str = {
         8'h48,8'h65,8'h6c,8'h6c,8'h6f,8'h20,
         8'h77,8'h6f,8'h72,8'h6c,8'h64,8'h21,8'ha,8'h0
     };
 
     int idx = 14;
-	logic putchar;
-	always_ff @(posedge clk) begin
-		if (reset) putchar <= '1;
-		else if (~valid) putchar <= '1;
-		else if (addr == TX_DATA && valid && wvalid && txState != RDY) putchar <= '0;
-	end
-	
-	
-    assign send = (idx != 0 && finish) || (addr == TX_DATA && valid && wvalid);
+
+    assign send = (idx != 0 && finish) || tx_store_launch;
 
     always_ff @(posedge clk) begin
         if (send && finish) begin
@@ -193,11 +202,19 @@ module device #(
     end
 
     assign tx = txBit;
-	assign tx_ready = txState == RDY;// && ~(send && putchar);
-	if (SIMULATION)
-		assign ready = '1;
-	else
-    	assign ready = tx_ready;
+    assign tx_ready = txState == RDY;
+
+    // Bus ready: finish the CBus beat in one handshake; UART shift runs in background.
+    // Do not tie ready to tx_ready for the whole bit period (that held CPU valid high
+    // and caused a second launch when txState returned to RDY).
+    always_comb begin
+        if (SIMULATION)
+            ready = 1'b1;
+        else if (tx_store)
+            ready = tx_ready;
+        else
+            ready = 1'b1;
+    end
 		
 	always_ff @(posedge clk) begin
 		if (~reset && valid && wvalid) begin
