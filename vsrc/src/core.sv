@@ -20,6 +20,8 @@ module core import common::*; import csr_pkg::*;(
 	input  ibus_resp_t iresp,
 	output dbus_req_t  dreq,
 	input  dbus_resp_t dresp,
+	output u2          ireq_priv,
+	output u2          dreq_priv,
 	output u2          priv_mode_o,
 	output u64         satp_o,
 	input  logic       trint, swint, exint
@@ -157,6 +159,7 @@ module core import common::*; import csr_pkg::*;(
 	u64   csr_mcycle, csr_satp;
 	u64   csr_mhartid;
 	u2    priv_mode;
+	u2    mmu_priv;
 	logic ecall_fire;
 	logic instr_fault_fire;
 	logic mem_fault_fire;
@@ -250,7 +253,7 @@ module core import common::*; import csr_pkg::*;(
 	endfunction
 
 	assign csr_mhartid = 64'd0;
-	assign priv_mode_o = priv_mode;
+	assign priv_mode_o = mmu_priv;
 	assign satp_o = csr_satp;
 	assign ecall_fire = id_ex.valid & id_ex.is_ecall & ~mem_wait & ~cpu_halt;
 	assign instr_fault_fire = fetch_fault & ~cpu_halt;
@@ -267,12 +270,14 @@ module core import common::*; import csr_pkg::*;(
 		.stop_fetch(cpu_halt | mem_wait),
 		.redirect_valid(redirect_valid),
 		.redirect_pc(redirect_pc),
+		.current_priv(mmu_priv),
 		.fetch_ok,
 		.fetch_valid,
 		.fetch_fault,
 		.fetch_stale,
 		.fetch_pc,
 		.fetch_instr,
+		.req_priv(ireq_priv),
 		.ireq,
 		.iresp
 	);
@@ -554,8 +559,10 @@ module core import common::*; import csr_pkg::*;(
 		.in_store_data(ex_mem.store_data),
 		.in_is_ebreak(ex_mem.is_ebreak),
 		.in_is_trap(ex_mem.is_trap),
+		.current_priv(mmu_priv),
 		.dreq,
 		.dresp,
+		.req_priv(dreq_priv),
 		.mem_wait,
 		.out_valid(mem_out_valid),
 		.out_pc(mem_out_pc),
@@ -685,7 +692,9 @@ module core import common::*; import csr_pkg::*;(
 			csr_mcycle   <= 64'd0;
 			csr_satp     <= 64'd0;
 			priv_mode    <= PRV_M;
+			mmu_priv     <= PRV_M;
 		end else begin
+			mmu_priv <= priv_mode;
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
 			csr_mcycle <= csr_mcycle + 64'd1;
@@ -717,6 +726,7 @@ module core import common::*; import csr_pkg::*;(
 				csr_mtval   <= 64'd0;
 				csr_mstatus <= ecall_mstatus_new;
 				priv_mode   <= PRV_M;
+				mmu_priv    <= PRV_M;
 			end
 
 			if (instr_fault_fire) begin
@@ -725,6 +735,7 @@ module core import common::*; import csr_pkg::*;(
 				csr_mtval   <= fetch_pc;
 				csr_mstatus <= ecall_mstatus_new;
 				priv_mode   <= PRV_M;
+				mmu_priv    <= PRV_M;
 			end
 
 			if (mem_fault_fire) begin
@@ -733,11 +744,13 @@ module core import common::*; import csr_pkg::*;(
 				csr_mtval   <= mem_fault_addr;
 				csr_mstatus <= ecall_mstatus_new;
 				priv_mode   <= PRV_M;
+				mmu_priv    <= PRV_M;
 			end
 
 			if (mret_fire) begin
 				csr_mstatus <= mret_mstatus_new;
 				priv_mode   <= mret_target_mode;
+				mmu_priv    <= mret_target_mode;
 			end
 
 `ifndef SYNTHESIS

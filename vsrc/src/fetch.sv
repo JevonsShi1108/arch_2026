@@ -11,23 +11,29 @@ module fetch import common::*;(
     input  logic       stop_fetch,
     input  logic       redirect_valid,
     input  u64         redirect_pc,
+    input  u2          current_priv,
     output logic       fetch_ok,
     output logic       fetch_valid,
     output logic       fetch_fault,
     output logic       fetch_stale,
     output u64         fetch_pc,
     output u32         fetch_instr,
+    output u2          req_priv,
     output ibus_req_t  ireq,
     input  ibus_resp_t iresp
 );
     logic pending;
     logic awaiting_resp;
+    logic redirect_valid_q;
+    logic [1:0] req_priv_q;
     u64   req_pc;
     logic redirect_pending;
     u64   redirect_pc_q;
 
-    assign ireq.valid = pending & ~awaiting_resp & ~stop_fetch;
+    assign ireq.valid = pending & ~awaiting_resp & ~stop_fetch & ~redirect_valid_q;
     assign ireq.addr  = req_pc;
+    // For pulse-style request, expose current_priv on the issue cycle directly.
+    assign req_priv   = ireq.valid ? current_priv : req_priv_q;
 
     assign fetch_ok    = iresp.data_ok;
     assign fetch_valid = iresp.data_ok & pending & ~iresp.fault;
@@ -40,10 +46,13 @@ module fetch import common::*;(
         if (reset) begin
             pending          <= 1'b1;
             awaiting_resp    <= 1'b0;
+            redirect_valid_q <= 1'b0;
+            req_priv_q       <= 2'b11;
             req_pc           <= PCINIT;
             redirect_pending <= 1'b0;
             redirect_pc_q    <= 64'd0;
         end else begin
+            redirect_valid_q <= redirect_valid;
             if (redirect_valid) begin
                 redirect_pending <= 1'b1;
                 redirect_pc_q    <= redirect_pc;
@@ -73,6 +82,7 @@ module fetch import common::*;(
                 end
             end else if (ireq.valid) begin
                 awaiting_resp <= 1'b1;
+                req_priv_q <= current_priv;
             end
         end
     end

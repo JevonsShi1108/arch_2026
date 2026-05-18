@@ -32,11 +32,15 @@ module SimTop import common::*;(
     cbus_resp_t icresp, dcresp;
     cbus_req_t  mmu_ireq;
     cbus_resp_t mmu_iresp;
+    u2          mmu_priv;
+    u2          ireq_priv;
+    u2          dreq_priv;
     u2          priv_mode_o;
     u64         satp_o;
 
     core core(
       .clk(clock), .reset, .ireq, .iresp, .dreq, .dresp,
+      .ireq_priv, .dreq_priv,
       .priv_mode_o, .satp_o, .trint, .swint, .exint
     );
 
@@ -45,7 +49,9 @@ module SimTop import common::*;(
     CBusArbiter mux(
         .clk(clock), .reset,
         .ireqs({icreq, dcreq}),
+        .iprivs({ireq_priv, dreq_priv}),
         .iresps({icresp, dcresp}),
+        .opriv(mmu_priv),
         .oreq(mmu_ireq),
         .oresp(mmu_iresp)
     );
@@ -57,7 +63,7 @@ module SimTop import common::*;(
         .up_resp(mmu_iresp),
         .dn_req(oreq),
         .dn_resp(oresp),
-        .priv_mode(priv_mode_o),
+        .priv_mode(mmu_priv),
         .satp(satp_o)
     );
 
