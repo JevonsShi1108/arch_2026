@@ -47,6 +47,10 @@ module fetch import common::*;(
             if (redirect_valid) begin
                 redirect_pending <= 1'b1;
                 redirect_pc_q    <= redirect_pc;
+                // If there is no outstanding I-bus request, switch fetch PC now.
+                if (!awaiting_resp) begin
+                    req_pc <= redirect_pc;
+                end
             end
 
             if (pending && iresp.data_ok) begin
