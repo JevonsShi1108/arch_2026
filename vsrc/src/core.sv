@@ -253,7 +253,7 @@ module core import common::*; import csr_pkg::*;(
 	assign priv_mode_o = priv_mode;
 	assign satp_o = csr_satp;
 	assign ecall_fire = id_ex.valid & id_ex.is_ecall & ~mem_wait & ~cpu_halt;
-	assign instr_fault_fire = fetch_fault & ~mem_wait & ~cpu_halt;
+	assign instr_fault_fire = fetch_fault & ~cpu_halt;
 	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
 	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mem_fault_fire | mret_fire;
 	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? csr_mtvec : csr_mepc;
