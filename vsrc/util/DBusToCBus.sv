@@ -30,7 +30,7 @@ module DBusToCBus
     assign dcreq.is_fetch = IS_FETCH;
 
     logic okay;
-    assign okay = dcresp.ready && dcresp.last;
+    assign okay = (dcresp.ready === 1'b1) && (dcresp.last === 1'b1);
 
     assign dresp.addr_ok = okay;
     assign dresp.data_ok = okay;

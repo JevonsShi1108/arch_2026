@@ -78,7 +78,7 @@ module CBusArbiter
                     end
                 end
             end
-            if (oresp.last)
+            if ((oresp.ready === 1'b1) && (oresp.last === 1'b1))
                 {busy, saved_req, saved_priv} <= '0;
         end else begin
             if (selected_req.valid) begin
