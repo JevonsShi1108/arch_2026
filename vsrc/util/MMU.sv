@@ -25,11 +25,12 @@ module MMU import common::*;(
 
     typedef enum logic [2:0] {
         MMU_IDLE = 3'd0,
-        MMU_PTW_L2 = 3'd1,
-        MMU_PTW_L1 = 3'd2,
-        MMU_PTW_L0 = 3'd3,
-        MMU_FINAL_REQ = 3'd4,
-        MMU_FAULT = 3'd5
+        MMU_CHECK = 3'd1,
+        MMU_PTW_L2 = 3'd2,
+        MMU_PTW_L1 = 3'd3,
+        MMU_PTW_L0 = 3'd4,
+        MMU_FINAL_REQ = 3'd5,
+        MMU_FAULT = 3'd6
     } mmu_state_t;
 
     mmu_state_t state;
@@ -40,8 +41,10 @@ module MMU import common::*;(
     u2  priv_mode_q;
     u64 satp_q;
 
-    logic translate_en;
+    logic translate_en_q;
     logic dn_done;
+    logic dn_resp_fire;
+    logic resp_armed_q;
     u9 req_vpn2;
     u9 req_vpn1;
     u9 req_vpn0;
@@ -94,8 +97,11 @@ module MMU import common::*;(
         end
     endfunction
 
-    assign translate_en = (priv_mode != PRV_M) && (satp[63:60] == SATP_MODE_SV39);
-    assign dn_done = dn_resp.ready && dn_resp.last;
+    assign translate_en_q = (priv_mode_q != PRV_M) && (satp_q[63:60] == SATP_MODE_SV39);
+    assign dn_resp_fire = (dn_resp.ready === 1'b1) && (dn_resp.last === 1'b1);
+    // For read responses, require one armed cycle before consuming data.
+    // Keep write path immediate so MMIO writes are not delayed.
+    assign dn_done = (state == MMU_FINAL_REQ && req_q.is_write) ? dn_resp_fire : (resp_armed_q && dn_resp_fire);
     assign req_vpn2 = req_q.addr[38:30];
     assign req_vpn1 = req_q.addr[29:21];
     assign req_vpn0 = req_q.addr[20:12];
@@ -129,7 +135,9 @@ module MMU import common::*;(
     always_comb begin
         up_resp = '0;
         if (state == MMU_FINAL_REQ) begin
-            up_resp = dn_resp;
+            if (dn_done) begin
+                up_resp = dn_resp;
+            end
         end else if (state == MMU_FAULT) begin
             up_resp.ready = 1'b1;
             up_resp.last = 1'b1;
@@ -147,20 +155,25 @@ module MMU import common::*;(
             phys_addr_q <= 64'd0;
             priv_mode_q <= PRV_M;
             satp_q <= 64'd0;
+            resp_armed_q <= 1'b0;
         end else begin
+            resp_armed_q <= 1'b0;
             unique case (state)
                 MMU_IDLE: begin
                     if (up_req.valid) begin
                         req_q <= up_req;
                         priv_mode_q <= priv_mode;
                         satp_q <= satp;
-                        if (translate_en) begin
-                            pte_addr_q <= make_pte_addr(satp[43:0], up_req.addr[38:30]);
-                            state <= MMU_PTW_L2;
-                        end else begin
-                            phys_addr_q <= up_req.addr;
-                            state <= MMU_FINAL_REQ;
-                        end
+                        state <= MMU_CHECK;
+                    end
+                end
+                MMU_CHECK: begin
+                    if (translate_en_q) begin
+                        pte_addr_q <= make_pte_addr(satp_q[43:0], req_vpn2);
+                        state <= MMU_PTW_L2;
+                    end else begin
+                        phys_addr_q <= req_q.addr;
+                        state <= MMU_FINAL_REQ;
                     end
                 end
                 MMU_PTW_L2: begin
@@ -173,6 +186,9 @@ module MMU import common::*;(
                             state <= MMU_FAULT;
                         end
                     end
+                    else begin
+                        resp_armed_q <= 1'b1;
+                    end
                 end
                 MMU_PTW_L1: begin
                     if (dn_done) begin
@@ -183,6 +199,9 @@ module MMU import common::*;(
                         end else begin
                             state <= MMU_FAULT;
                         end
+                    end
+                    else begin
+                        resp_armed_q <= 1'b1;
                     end
                 end
                 MMU_PTW_L0: begin
@@ -201,11 +220,17 @@ module MMU import common::*;(
                             state <= MMU_FAULT;
                         end
                     end
+                    else begin
+                        resp_armed_q <= 1'b1;
+                    end
                 end
                 MMU_FINAL_REQ: begin
                     if (dn_done) begin
                         req_q <= '0;
                         state <= MMU_IDLE;
+                    end
+                    else begin
+                        resp_armed_q <= 1'b1;
                     end
                 end
                 MMU_FAULT: begin
