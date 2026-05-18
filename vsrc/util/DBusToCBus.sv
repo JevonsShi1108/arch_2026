@@ -11,7 +11,9 @@
  */
 
 module DBusToCBus
-    import common::*;(
+    import common::*;#(
+    parameter logic IS_FETCH = 1'b0
+)(
     input  dbus_req_t  dreq,
     output dbus_resp_t dresp,
     output cbus_req_t  dcreq,
@@ -24,13 +26,15 @@ module DBusToCBus
     assign dcreq.strobe   =  dreq.strobe;
     assign dcreq.data     =  dreq.data;
     assign dcreq.len      =  MLEN1;
-	assign dcreq.burst = AXI_BURST_FIXED;
+    assign dcreq.burst    = AXI_BURST_FIXED;
+    assign dcreq.is_fetch = IS_FETCH;
 
     logic okay;
     assign okay = dcresp.ready && dcresp.last;
 
     assign dresp.addr_ok = okay;
     assign dresp.data_ok = okay;
+    assign dresp.fault   = dcresp.fault;
     assign dresp.data    = dcresp.data;
 endmodule
 

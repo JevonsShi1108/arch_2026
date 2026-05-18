@@ -35,6 +35,8 @@ module mem_stage import common::*;(
     output logic out_is_load,
     output logic out_is_store,
     output u64   out_mem_addr,
+    output logic out_fault,
+    output logic out_fault_is_store,
     output logic out_is_ebreak,
     output logic out_is_trap,
     output logic out_is_mmio
@@ -146,7 +148,7 @@ module mem_stage import common::*;(
     end
 
     assign cur_is_mem = cur_valid & (cur_is_load | cur_is_store);
-    assign cur_done   = ~cur_is_mem | dresp.data_ok;
+    assign cur_done   = ~cur_is_mem | dresp.data_ok | dresp.fault;
     assign mem_wait   = cur_is_mem & ~cur_done;
 
     assign byte_off          = cur_mem_addr[2:0];
@@ -189,11 +191,13 @@ module mem_stage import common::*;(
     assign out_pc        = cur_pc;
     assign out_instr     = cur_instr;
     assign out_rd        = cur_rd;
-    assign out_reg_write = cur_reg_write;
+    assign out_reg_write = cur_reg_write & ~(cur_is_mem & dresp.fault);
     assign out_result    = cur_is_load ? load_result : cur_result;
     assign out_is_load   = cur_is_load;
     assign out_is_store  = cur_is_store;
     assign out_mem_addr  = cur_mem_addr;
+    assign out_fault     = cur_is_mem & dresp.fault;
+    assign out_fault_is_store = cur_is_store;
     assign out_is_ebreak = cur_is_ebreak;
     assign out_is_trap   = cur_is_trap;
     assign out_is_mmio   = (cur_is_load | cur_is_store) & is_device_addr;
@@ -208,7 +212,7 @@ module mem_stage import common::*;(
 `endif
             pending <= 1'b0;
         end else begin
-            if (!pending && in_valid && (in_is_load || in_is_store) && !dresp.data_ok) begin
+            if (!pending && in_valid && (in_is_load || in_is_store) && !dresp.data_ok && !dresp.fault) begin
 `ifndef SYNTHESIS
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_set", "request entered pending wait",
                               in_pc, in_mem_addr, in_is_load, in_is_store, dresp.data_ok, pending);
@@ -227,7 +231,7 @@ module mem_stage import common::*;(
                 pend_store_data     <= in_store_data;
                 pend_is_ebreak      <= in_is_ebreak;
                 pend_is_trap        <= in_is_trap;
-            end else if (pending && dresp.data_ok) begin
+            end else if (pending && (dresp.data_ok || dresp.fault)) begin
 `ifndef SYNTHESIS
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_clear", "pending request observed data_ok",
                               pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);

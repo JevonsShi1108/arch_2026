@@ -187,6 +187,7 @@ typedef struct packed {
 typedef struct packed {
     logic  addr_ok;     // is the address accepted by cache?
     logic  data_ok;     // is the field "data" valid?
+    logic  fault;       // page/access fault from memory/MMU path
     word_t data;        // the data read from cache
 } dbus_resp_t;
 
@@ -204,6 +205,7 @@ typedef struct packed {
 typedef struct packed {
     logic  addr_ok;     // is the address accepted by cache?
     logic  data_ok;     // is the field "data" valid?
+    logic  fault;       // instruction fetch fault from memory/MMU path
     u32 data;           // the data read from cache
 } ibus_resp_t;
 
@@ -211,7 +213,7 @@ typedef struct packed {
     {ireq, MSIZE4, 8'b0, 64'b0}
 
 `define DRESP_TO_IRESP(dresp, ireq) \
-    {dresp.addr_ok, dresp.data_ok, ireq.addr[2] ? dresp.data[63:32] : dresp.data[31:0]}
+    {dresp.addr_ok, dresp.data_ok, dresp.fault, ireq.addr[2] ? dresp.data[63:32] : dresp.data[31:0]}
 
 /**
  * cache bus: simplified burst AXI transaction interface
@@ -226,6 +228,7 @@ typedef enum i2 {
 typedef struct packed {
     logic    valid;     // in request?
     logic    is_write;  // is it a write transaction?
+    logic    is_fetch;  // is it an instruction fetch request?
     msize_t  size;      // number of bytes in one burst
     addr_t   addr;      // start address
     strobe_t strobe;    // which bytes are enabled?
@@ -237,6 +240,7 @@ typedef struct packed {
 typedef struct packed {
     logic  ready;       // is data arrived in this cycle?
     logic  last;        // is it the last word?
+    logic  fault;       // MMU/page-walk fault for this transaction
     word_t data;        // the data from AXI bus
 } cbus_resp_t;
 

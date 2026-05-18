@@ -140,6 +140,7 @@ module core import common::*; import csr_pkg::*;(
 	// Fetch
 	logic fetch_ok;
 	logic fetch_valid;
+	logic fetch_fault;
 	logic fetch_stale;
 	u64   fetch_pc;
 	u32   fetch_instr;
@@ -158,6 +159,10 @@ module core import common::*; import csr_pkg::*;(
 	u2    priv_mode;
 	logic ecall_fire;
 	logic instr_fault_fire;
+	logic mem_fault_fire;
+	logic mem_fault_is_store;
+	u64   mem_fault_pc;
+	u64   mem_fault_addr;
 	logic mret_fire;
 	logic trap_redirect_valid;
 	u64   trap_redirect_pc;
@@ -248,10 +253,10 @@ module core import common::*; import csr_pkg::*;(
 	assign priv_mode_o = priv_mode;
 	assign satp_o = csr_satp;
 	assign ecall_fire = id_ex.valid & id_ex.is_ecall & ~mem_wait & ~cpu_halt;
-	assign instr_fault_fire = 1'b0;
+	assign instr_fault_fire = fetch_fault & ~mem_wait & ~cpu_halt;
 	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
-	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mret_fire;
-	assign trap_redirect_pc = (ecall_fire | instr_fault_fire) ? csr_mtvec : csr_mepc;
+	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mem_fault_fire | mret_fire;
+	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? csr_mtvec : csr_mepc;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
 	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
 	                     (csr_redirect_valid ? csr_redirect_pc : branch_correct_pc);
@@ -264,6 +269,7 @@ module core import common::*; import csr_pkg::*;(
 		.redirect_pc(redirect_pc),
 		.fetch_ok,
 		.fetch_valid,
+		.fetch_fault,
 		.fetch_stale,
 		.fetch_pc,
 		.fetch_instr,
@@ -523,6 +529,8 @@ module core import common::*; import csr_pkg::*;(
 	// MEM
 	logic mem_out_valid, mem_out_reg_write, mem_out_is_load, mem_out_is_store, mem_out_is_ebreak, mem_out_is_trap;
 	logic mem_out_is_mmio;
+	logic mem_out_fault;
+	logic mem_out_fault_is_store;
 	u64   mem_out_pc, mem_out_result;
 	u64   mem_out_mem_addr;
 	u32   mem_out_instr;
@@ -558,10 +566,16 @@ module core import common::*; import csr_pkg::*;(
 		.out_is_load(mem_out_is_load),
 		.out_is_store(mem_out_is_store),
 		.out_mem_addr(mem_out_mem_addr),
+		.out_fault(mem_out_fault),
+		.out_fault_is_store(mem_out_fault_is_store),
 		.out_is_ebreak(mem_out_is_ebreak),
 		.out_is_trap(mem_out_is_trap),
 		.out_is_mmio(mem_out_is_mmio)
 	);
+	assign mem_fault_fire = mem_out_valid & mem_out_fault & ~cpu_halt;
+	assign mem_fault_is_store = mem_out_fault_is_store;
+	assign mem_fault_pc = mem_out_pc;
+	assign mem_fault_addr = mem_out_mem_addr;
 
 	// WB
 	logic wb_valid, wb_is_ebreak, wb_is_trap;
@@ -706,9 +720,17 @@ module core import common::*; import csr_pkg::*;(
 			end
 
 			if (instr_fault_fire) begin
-				csr_mepc    <= id_ex.pc;
-				csr_mcause  <= 64'd1;
-				csr_mtval   <= id_ex.pc;
+				csr_mepc    <= fetch_pc;
+				csr_mcause  <= 64'd12;
+				csr_mtval   <= fetch_pc;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end
+
+			if (mem_fault_fire) begin
+				csr_mepc    <= mem_fault_pc;
+				csr_mcause  <= mem_fault_is_store ? 64'd15 : 64'd13;
+				csr_mtval   <= mem_fault_addr;
 				csr_mstatus <= ecall_mstatus_new;
 				priv_mode   <= PRV_M;
 			end

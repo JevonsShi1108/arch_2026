@@ -13,6 +13,7 @@ module fetch import common::*;(
     input  u64         redirect_pc,
     output logic       fetch_ok,
     output logic       fetch_valid,
+    output logic       fetch_fault,
     output logic       fetch_stale,
     output u64         fetch_pc,
     output u32         fetch_instr,
@@ -28,7 +29,8 @@ module fetch import common::*;(
     assign ireq.addr  = req_pc;
 
     assign fetch_ok    = iresp.data_ok;
-    assign fetch_valid = iresp.data_ok & pending;
+    assign fetch_valid = iresp.data_ok & pending & ~iresp.fault;
+    assign fetch_fault = iresp.data_ok & pending & iresp.fault;
     assign fetch_pc    = req_pc;
     assign fetch_instr = iresp.data;
     assign fetch_stale = fetch_valid & redirect_pending;

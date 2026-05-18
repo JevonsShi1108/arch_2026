@@ -89,11 +89,13 @@ module SimpleArbiter
 
 	for (genvar i = 0; i < RMEM_WIDTH; i++) begin
 		assign rresp[i].addr_ok = 1'b1;
+		assign rresp[i].fault = 1'b0;
 		assign rresp[i].data = dresp[i].data;
 	end
 
 	for (genvar i = 0; i < WMEM_WIDTH; i++) begin
 		assign wresp[i].addr_ok = 1'b1;
+		assign wresp[i].fault = 1'b0;
 		assign wresp[i].data = 'x;
 		
 	end	
