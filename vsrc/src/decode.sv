@@ -28,6 +28,8 @@ module decode import common::*;(
     output logic load_unsigned,
     output logic is_ebreak,
     output logic is_trap,
+    output logic is_ecall,
+    output logic is_mret,
     output logic is_muldiv,
     output logic is_csr,
     output u12   csr_addr,
@@ -93,6 +95,8 @@ module decode import common::*;(
         load_unsigned = 1'b0;
         is_ebreak = 1'b0;
         is_trap   = 1'b0;
+        is_ecall  = 1'b0;
+        is_mret   = 1'b0;
         is_muldiv = 1'b0;
         is_csr    = 1'b0;
         csr_addr  = 12'd0;
@@ -282,6 +286,10 @@ module decode import common::*;(
                     if (instr == 32'h00100073) begin
                         is_ebreak = 1'b1;
                         is_trap   = 1'b1;
+                    end else if (instr == 32'h00000073) begin
+                        is_ecall  = 1'b1;
+                    end else if (instr == 32'h30200073) begin
+                        is_mret   = 1'b1;
                     end
                 end else begin
                     is_csr      = 1'b1;

@@ -39,3 +39,21 @@ Lab2 引入 `mem_wait` 后，`core.sv` 将 `stop_fetch` 置为 `cpu_halt | mem_w
 ### 8 验证情况说明
 
 在完成上述扩展与取指停顿修复后，`make test-lab3` 仿真可运行至 `HIT GOOD TRAP`，表明分支/跳转与新增算术指令在 Difftest 对齐下满足 Lab3 功能目标；同时 Lab3 所需的 Difftest `skip` 条件已在提交边界按访存地址实现。若需完整回归，建议在本机继续执行 `make test-lab1` 与 `make test-lab2` 以确认对前期实验行为无回归。
+
+### 9 Lab3 上板 UART 无输出问题补丁说明
+
+在真实硬件路径（`vivado/src/with_delay`）中，UART 对应 MMIO 写地址为 `0x40600004`。本次补丁针对 `mem.sv` 做了最小修复：去掉“device store 立即完成”的特例，让 store 与 load 一样都等待 `dresp.data_ok`。这样在 CBus 仲裁存在 1 拍建立延迟时，`dreq.valid` 仍能保持到设备侧真正接收请求，避免 UART 发送请求被静默丢失。
+
+具体改动位于 `vsrc/src/mem.sv`：
+
+- `cur_done` 统一为 `~cur_is_mem | dresp.data_ok`；
+- pending 置位条件统一为 `in_is_load || in_is_store` 且 `!dresp.data_ok`。
+
+该改动不影响 Verilator 路径语义（原本即按 `dresp.data_ok` 等待），主要修复上板路径中 MMIO store 的握手时序问题。
+
+上板串口采集建议：
+
+- 串口参数使用 `8N1`；
+- 波特率按 `25MHz / (BIT_TMR_MAX + 1)` 近似配置为 `28800`（当前 `BIT_TMR_MAX = 868`）。
+
+另：本次不在 RTL 中改 BRAM IP 配置。上板前需在 Vivado 里手动将 `bram_0` 的 `Coe_File` 指向 `ready-to-run/lab3/lab3-test.coe`，并重新生成 IP 输出后再综合实现。

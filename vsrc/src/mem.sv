@@ -36,7 +36,8 @@ module mem_stage import common::*;(
     output logic out_is_store,
     output u64   out_mem_addr,
     output logic out_is_ebreak,
-    output logic out_is_trap
+    output logic out_is_trap,
+    output logic out_is_mmio
 );
     logic   pending;
     u64     pend_pc;
@@ -91,6 +92,8 @@ module mem_stage import common::*;(
                 is_mmio_addr = 1'b1;
             else if (addr >= 64'h0000_0000_2000_3000 && addr <= 64'h0000_0000_2000_30ff)
                 is_mmio_addr = 1'b1;
+            else if (addr >= 64'h0000_0000_a200_0000 && addr <= 64'h0000_0000_a200_ffff)
+                is_mmio_addr = 1'b1;
         end
     endfunction
 
@@ -143,13 +146,7 @@ module mem_stage import common::*;(
     end
 
     assign cur_is_mem = cur_valid & (cur_is_load | cur_is_store);
-`ifdef VERILATOR
     assign cur_done   = ~cur_is_mem | dresp.data_ok;
-`else
-    assign cur_done = ~cur_is_mem
-                    | (cur_is_load  ? dresp.data_ok
-                       : (cur_is_store && !is_device_addr ? dresp.data_ok : 1'b1));
-`endif
     assign mem_wait   = cur_is_mem & ~cur_done;
 
     assign byte_off          = cur_mem_addr[2:0];
@@ -199,6 +196,7 @@ module mem_stage import common::*;(
     assign out_mem_addr  = cur_mem_addr;
     assign out_is_ebreak = cur_is_ebreak;
     assign out_is_trap   = cur_is_trap;
+    assign out_is_mmio   = (cur_is_load | cur_is_store) & is_device_addr;
 
     always_ff @(posedge clk) begin
         if (reset || flush) begin
@@ -210,12 +208,7 @@ module mem_stage import common::*;(
 `endif
             pending <= 1'b0;
         end else begin
-`ifdef VERILATOR
             if (!pending && in_valid && (in_is_load || in_is_store) && !dresp.data_ok) begin
-`else
-    if (!pending && in_valid &&
-        ((in_is_load || (in_is_store && !is_device_in)) && !dresp.data_ok)) begin
-`endif
 `ifndef SYNTHESIS
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_set", "request entered pending wait",
                               in_pc, in_mem_addr, in_is_load, in_is_store, dresp.data_ok, pending);

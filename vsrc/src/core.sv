@@ -20,6 +20,8 @@ module core import common::*; import csr_pkg::*;(
 	input  ibus_resp_t iresp,
 	output dbus_req_t  dreq,
 	input  dbus_resp_t dresp,
+	output u2          priv_mode_o,
+	output u64         satp_o,
 	input  logic       trint, swint, exint
 );
 	typedef struct packed {
@@ -52,6 +54,8 @@ module core import common::*; import csr_pkg::*;(
 		logic load_unsigned;
 		logic is_ebreak;
 		logic is_trap;
+		logic is_ecall;
+		logic is_mret;
 		logic is_muldiv;
 		logic is_csr;
 		u12   csr_addr;
@@ -95,6 +99,7 @@ module core import common::*; import csr_pkg::*;(
 		u64   result;
 		logic is_load;
 		logic is_store;
+		logic is_mmio;
 		u64   mem_addr;
 		logic is_ebreak;
 		logic is_trap;
@@ -110,6 +115,18 @@ module core import common::*; import csr_pkg::*;(
 	localparam u4 ALU_AND = 4'd2;
 	localparam u4 ALU_OR  = 4'd3;
 	localparam u4 ALU_XOR = 4'd4;
+	localparam u2 PRV_U = 2'b00;
+	localparam u2 PRV_M = 2'b11;
+	localparam int MSTATUS_UIE_BIT  = 0;
+	localparam int MSTATUS_SIE_BIT  = 1;
+	localparam int MSTATUS_MIE_BIT  = 3;
+	localparam int MSTATUS_UPIE_BIT = 4;
+	localparam int MSTATUS_SPIE_BIT = 5;
+	localparam int MSTATUS_MPIE_BIT = 7;
+	localparam int MSTATUS_SPP_BIT  = 8;
+	localparam int MSTATUS_MPP_LSB  = 11;
+	localparam int MSTATUS_MPP_MSB  = 12;
+	localparam int MSTATUS_MPRV_BIT = 17;
 	localparam u2 CSR_OP_NONE  = 2'd0;
 	localparam u2 CSR_OP_WRITE = 2'd1;
 	localparam u2 CSR_OP_SET   = 2'd2;
@@ -138,6 +155,39 @@ module core import common::*; import csr_pkg::*;(
 	u64   csr_mscratch, csr_mcause, csr_mtval, csr_mepc;
 	u64   csr_mcycle, csr_satp;
 	u64   csr_mhartid;
+	u2    priv_mode;
+	logic ecall_fire;
+	logic instr_fault_fire;
+	logic mret_fire;
+	logic trap_redirect_valid;
+	u64   trap_redirect_pc;
+	u64   ecall_mstatus_new;
+	u64   mret_mstatus_new;
+	u2    mret_target_mode;
+	u64   ecall_mcause;
+
+	function automatic u64 set_mstatus_field(
+		input u64 old_val_i,
+		input int lsb_i,
+		input int msb_i,
+		input u64 field_val_i
+	);
+		u64 mask;
+		begin
+			mask = ((64'h1 << (msb_i - lsb_i + 1)) - 64'h1) << lsb_i;
+			set_mstatus_field = (old_val_i & ~mask) | ((field_val_i << lsb_i) & mask);
+		end
+	endfunction
+
+	function automatic u64 ecall_cause_by_mode(input u2 mode_i);
+		begin
+			unique case (mode_i)
+				PRV_U:   ecall_cause_by_mode = 64'd8;
+				2'b01:   ecall_cause_by_mode = 64'd9;
+				default: ecall_cause_by_mode = 64'd11;
+			endcase
+		end
+	endfunction
 
 	function automatic u64 csr_read_data(
 		input u12 csr_addr_i,
@@ -195,8 +245,16 @@ module core import common::*; import csr_pkg::*;(
 	endfunction
 
 	assign csr_mhartid = 64'd0;
-	assign redirect_valid = csr_redirect_valid | branch_mispredict;
-	assign redirect_pc = csr_redirect_valid ? csr_redirect_pc : branch_correct_pc;
+	assign priv_mode_o = priv_mode;
+	assign satp_o = csr_satp;
+	assign ecall_fire = id_ex.valid & id_ex.is_ecall & ~mem_wait & ~cpu_halt;
+	assign instr_fault_fire = 1'b0;
+	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
+	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mret_fire;
+	assign trap_redirect_pc = (ecall_fire | instr_fault_fire) ? csr_mtvec : csr_mepc;
+	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
+	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
+	                     (csr_redirect_valid ? csr_redirect_pc : branch_correct_pc);
 
 	fetch u_fetch(
 		.clk,
@@ -220,7 +278,7 @@ module core import common::*; import csr_pkg::*;(
 	logic dec_is_branch, dec_is_jal, dec_is_jalr, dec_is_auipc, dec_is_lui, dec_is_load, dec_is_store;
 	msize_t dec_mem_size;
 	logic dec_load_unsigned;
-	logic dec_is_ebreak, dec_is_trap, dec_is_muldiv;
+	logic dec_is_ebreak, dec_is_trap, dec_is_ecall, dec_is_mret, dec_is_muldiv;
 	logic dec_is_csr, dec_csr_use_imm, dec_csr_we_intent;
 	u12   dec_csr_addr;
 	u2    dec_csr_op;
@@ -252,6 +310,8 @@ module core import common::*; import csr_pkg::*;(
 		.load_unsigned(dec_load_unsigned),
 		.is_ebreak(dec_is_ebreak),
 		.is_trap(dec_is_trap),
+		.is_ecall(dec_is_ecall),
+		.is_mret(dec_is_mret),
 		.is_muldiv(dec_is_muldiv),
 		.is_csr(dec_is_csr),
 		.csr_addr(dec_csr_addr),
@@ -442,9 +502,27 @@ module core import common::*; import csr_pkg::*;(
 	assign ex_result_final = id_ex.is_csr ? ex_csr_old_data : ex_out_result;
 	assign csr_redirect_valid = ex_csr_we;
 	assign csr_redirect_pc = id_ex.pc + 64'd4;
+	assign ecall_mcause = ecall_cause_by_mode(priv_mode);
+
+	always_comb begin
+		ecall_mstatus_new = csr_mstatus;
+		ecall_mstatus_new[MSTATUS_MPIE_BIT] = csr_mstatus[MSTATUS_MIE_BIT];
+		ecall_mstatus_new[MSTATUS_MIE_BIT] = 1'b0;
+		ecall_mstatus_new = set_mstatus_field(ecall_mstatus_new, MSTATUS_MPP_LSB, MSTATUS_MPP_MSB, {62'd0, priv_mode});
+
+		mret_target_mode = csr_mstatus[MSTATUS_MPP_MSB:MSTATUS_MPP_LSB];
+		mret_mstatus_new = csr_mstatus;
+		mret_mstatus_new[MSTATUS_MIE_BIT] = csr_mstatus[MSTATUS_MPIE_BIT];
+		mret_mstatus_new[MSTATUS_MPIE_BIT] = 1'b1;
+		mret_mstatus_new = set_mstatus_field(mret_mstatus_new, MSTATUS_MPP_LSB, MSTATUS_MPP_MSB, {62'd0, PRV_U});
+		if (mret_target_mode != PRV_M) begin
+			mret_mstatus_new[MSTATUS_MPRV_BIT] = 1'b0;
+		end
+	end
 
 	// MEM
 	logic mem_out_valid, mem_out_reg_write, mem_out_is_load, mem_out_is_store, mem_out_is_ebreak, mem_out_is_trap;
+	logic mem_out_is_mmio;
 	u64   mem_out_pc, mem_out_result;
 	u64   mem_out_mem_addr;
 	u32   mem_out_instr;
@@ -481,7 +559,8 @@ module core import common::*; import csr_pkg::*;(
 		.out_is_store(mem_out_is_store),
 		.out_mem_addr(mem_out_mem_addr),
 		.out_is_ebreak(mem_out_is_ebreak),
-		.out_is_trap(mem_out_is_trap)
+		.out_is_trap(mem_out_is_trap),
+		.out_is_mmio(mem_out_is_mmio)
 	);
 
 	// WB
@@ -509,7 +588,7 @@ module core import common::*; import csr_pkg::*;(
 	);
 
 	// Commit register for Difftest
-	logic commit_valid, commit_wen, commit_is_trap, commit_is_mem;
+	logic commit_valid, commit_wen, commit_is_trap, commit_is_mem, commit_skip;
 	u64   commit_pc, commit_wdata, commit_mem_addr;
 	u32   commit_instr;
 	u5    commit_wdest;
@@ -575,6 +654,7 @@ module core import common::*; import csr_pkg::*;(
 			commit_wdata <= 64'd0;
 			commit_is_trap <= 1'b0;
 			commit_is_mem  <= 1'b0;
+			commit_skip    <= 1'b0;
 			commit_mem_addr<= 64'd0;
 			cpu_halt     <= 1'b0;
 			cycle_cnt <= 64'd0;
@@ -590,6 +670,7 @@ module core import common::*; import csr_pkg::*;(
 			csr_mepc     <= 64'd0;
 			csr_mcycle   <= 64'd0;
 			csr_satp     <= 64'd0;
+			priv_mode    <= PRV_M;
 		end else begin
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
@@ -614,6 +695,27 @@ module core import common::*; import csr_pkg::*;(
 					default: begin
 					end
 				endcase
+			end
+
+			if (ecall_fire) begin
+				csr_mepc    <= id_ex.pc;
+				csr_mcause  <= ecall_mcause;
+				csr_mtval   <= 64'd0;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end
+
+			if (instr_fault_fire) begin
+				csr_mepc    <= id_ex.pc;
+				csr_mcause  <= 64'd1;
+				csr_mtval   <= id_ex.pc;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end
+
+			if (mret_fire) begin
+				csr_mstatus <= mret_mstatus_new;
+				priv_mode   <= mret_target_mode;
 			end
 
 `ifndef SYNTHESIS
@@ -646,6 +748,7 @@ module core import common::*; import csr_pkg::*;(
 			commit_wdata   <= wb_wdata;
 			commit_is_trap <= wb_is_trap;
 			commit_is_mem  <= mem_wb.valid & (mem_wb.is_load | mem_wb.is_store);
+			commit_skip    <= mem_wb.valid & mem_wb.is_mmio & (mem_wb.is_load | mem_wb.is_store);
 			commit_mem_addr<= mem_wb.mem_addr;
 
 `ifndef SYNTHESIS
@@ -697,6 +800,7 @@ module core import common::*; import csr_pkg::*;(
 				mem_wb.result   <= mem_out_result;
 				mem_wb.is_load  <= mem_out_is_load;
 				mem_wb.is_store <= mem_out_is_store;
+				mem_wb.is_mmio  <= mem_out_is_mmio;
 				mem_wb.mem_addr <= mem_out_mem_addr;
 				mem_wb.is_ebreak<= mem_out_is_ebreak;
 				mem_wb.is_trap  <= mem_out_is_trap;
@@ -711,7 +815,7 @@ module core import common::*; import csr_pkg::*;(
 				ex_mem.pc        <= ex_out_pc;
 				ex_mem.instr     <= ex_out_instr;
 				ex_mem.rd        <= ex_out_rd;
-				ex_mem.reg_write <= ex_out_reg_write;
+				ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
 				ex_mem.result    <= ex_result_final;
 				ex_mem.is_load   <= ex_out_is_load;
 				ex_mem.is_store  <= ex_out_is_store;
@@ -727,7 +831,7 @@ module core import common::*; import csr_pkg::*;(
 				ex_mem.csr_old_data <= ex_csr_old_data;
 				ex_mem.csr_new_data <= ex_csr_new_data;
 
-				if (branch_mispredict || csr_redirect_valid) begin
+				if (branch_mispredict || csr_redirect_valid || trap_redirect_valid) begin
 					// 冲刷水线中所有年轻指令
 					if_id.valid <= 1'b0;
 					id_ex.valid <= 1'b0;
@@ -759,6 +863,8 @@ module core import common::*; import csr_pkg::*;(
 					id_ex.load_unsigned <= dec_load_unsigned;
 					id_ex.is_ebreak  <= dec_is_ebreak;
 					id_ex.is_trap    <= dec_is_trap;
+					id_ex.is_ecall   <= dec_is_ecall;
+					id_ex.is_mret    <= dec_is_mret;
 					id_ex.is_muldiv  <= dec_is_muldiv;
 					id_ex.is_csr     <= dec_is_csr;
 					id_ex.csr_addr   <= dec_csr_addr;
@@ -793,7 +899,7 @@ module core import common::*; import csr_pkg::*;(
 		.valid              (commit_valid),
 		.pc                 (commit_pc),
 		.instr              (commit_instr),
-		.skip               (commit_is_mem && (commit_mem_addr[31] == 1'b0)),
+		.skip               (commit_skip),
 		.isRVC              (0),
 		.scFailed           (0),
 		.wen                (commit_wen),
@@ -851,7 +957,7 @@ module core import common::*; import csr_pkg::*;(
 	DifftestCSRState DifftestCSRState(
 		.clock              (clk),
 		.coreid             (csr_mhartid[7:0]),
-		.priviledgeMode     (2'd3),
+		.priviledgeMode     (priv_mode),
 		.mstatus            (csr_mstatus & MSTATUS_MASK),
 		.sstatus            (csr_mstatus & SSTATUS_MASK),
 		.mepc               (csr_mepc),
