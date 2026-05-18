@@ -21,11 +21,12 @@ module fetch import common::*;(
     input  ibus_resp_t iresp
 );
     logic pending;
+    logic awaiting_resp;
     u64   req_pc;
     logic redirect_pending;
     u64   redirect_pc_q;
 
-    assign ireq.valid = pending;
+    assign ireq.valid = pending & ~awaiting_resp & ~stop_fetch;
     assign ireq.addr  = req_pc;
 
     assign fetch_ok    = iresp.data_ok;
@@ -38,6 +39,7 @@ module fetch import common::*;(
     always_ff @(posedge clk) begin
         if (reset) begin
             pending          <= 1'b1;
+            awaiting_resp    <= 1'b0;
             req_pc           <= PCINIT;
             redirect_pending <= 1'b0;
             redirect_pc_q    <= 64'd0;
@@ -48,7 +50,12 @@ module fetch import common::*;(
             end
 
             if (pending && iresp.data_ok) begin
+                awaiting_resp <= 1'b0;
                 if (stop_fetch) begin
+                    pending <= 1'b1;
+                    req_pc  <= req_pc;
+                end else if (iresp.fault) begin
+                    // Keep PC stable on fault; core will trap with fetch_fault.
                     pending <= 1'b1;
                     req_pc  <= req_pc;
                 end else begin
@@ -60,6 +67,8 @@ module fetch import common::*;(
                         req_pc <= req_pc + 64'd4;
                     end
                 end
+            end else if (ireq.valid) begin
+                awaiting_resp <= 1'b1;
             end
         end
     end

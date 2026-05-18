@@ -27,9 +27,11 @@ module CBusArbiter
     logic busy;
     int index, select;
     cbus_req_t saved_req, selected_req;
+    logic pending_fetch_valid;
+    cbus_req_t pending_fetch_req;
 
-    // assign oreq = ireqs[index];
-    assign oreq = busy ? ireqs[index] : '0;  // prevent early issue
+    // Latch selected request, then hold it until response last.
+    assign oreq = busy ? saved_req : '0;
     assign selected_req = ireqs[select];
 
     // select a preferred request
@@ -59,19 +61,41 @@ module CBusArbiter
     always_ff @(posedge clk)
     if (~reset) begin
         if (busy) begin
+            // Capture one in-flight fetch pulse while another requester is busy.
+            if (!pending_fetch_valid) begin
+                for (int i = 0; i < NUM_INPUTS; i++) begin
+                    if ((index != i) && ireqs[i].valid && ireqs[i].is_fetch) begin
+                        pending_fetch_valid <= 1'b1;
+                        pending_fetch_req <= ireqs[i];
+                    end
+                end
+            end
             if (oresp.last)
                 {busy, saved_req} <= '0;
         end else begin
-            // if not valid, busy <= 0
-            busy <= selected_req.valid;
-            index <= select;
-            saved_req <= selected_req;
+            if (selected_req.valid) begin
+                busy <= 1'b1;
+                index <= select;
+                saved_req <= selected_req;
+            end else if (pending_fetch_valid) begin
+                busy <= 1'b1;
+                // fetch is connected as input 1 in current two-input topology
+                index <= 1;
+                saved_req <= pending_fetch_req;
+                pending_fetch_valid <= 1'b0;
+                pending_fetch_req <= '0;
+            end else begin
+                busy <= 1'b0;
+                saved_req <= '0;
+            end
         end
     end else begin
         {busy, index, saved_req} <= '0;
+        pending_fetch_valid <= 1'b0;
+        pending_fetch_req <= '0;
     end
 
-    `UNUSED_OK({saved_req});
+    `UNUSED_OK({saved_req, pending_fetch_req});
 endmodule
 
 
