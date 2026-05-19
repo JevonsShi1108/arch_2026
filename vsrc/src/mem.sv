@@ -85,6 +85,8 @@ module mem_stage import common::*;(
     logic is_device_addr;
     logic is_device_in;
     logic [1:0] req_priv_q;
+    logic data_ok_prev_q;
+    logic resp_fire;
 
     function automatic logic is_mmio_addr(input u64 addr);
         begin
@@ -151,7 +153,8 @@ module mem_stage import common::*;(
     end
 
     assign cur_is_mem = cur_valid & (cur_is_load | cur_is_store);
-    assign cur_done   = ~cur_is_mem | dresp.data_ok | dresp.fault;
+    assign resp_fire  = cur_is_mem && (dresp.data_ok === 1'b1) && !data_ok_prev_q;
+    assign cur_done   = ~cur_is_mem | resp_fire | dresp.fault;
     assign mem_wait   = cur_is_mem & ~cur_done;
 
     assign byte_off          = cur_mem_addr[2:0];
@@ -216,8 +219,10 @@ module mem_stage import common::*;(
 `endif
             pending <= 1'b0;
             req_priv_q <= 2'b11;
+            data_ok_prev_q <= 1'b0;
         end else begin
-            if (!pending && in_valid && (in_is_load || in_is_store) && !dresp.data_ok && !dresp.fault) begin
+            data_ok_prev_q <= dresp.data_ok;
+            if (!pending && in_valid && (in_is_load || in_is_store) && !resp_fire && !dresp.fault) begin
 `ifndef SYNTHESIS
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_set", "request entered pending wait",
                               in_pc, in_mem_addr, in_is_load, in_is_store, dresp.data_ok, pending);
@@ -237,7 +242,7 @@ module mem_stage import common::*;(
                 pend_is_ebreak      <= in_is_ebreak;
                 pend_is_trap        <= in_is_trap;
                 req_priv_q          <= current_priv;
-            end else if (pending && (dresp.data_ok || dresp.fault)) begin
+            end else if (pending && (resp_fire || dresp.fault)) begin
 `ifndef SYNTHESIS
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_clear", "pending request observed data_ok",
                               pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);

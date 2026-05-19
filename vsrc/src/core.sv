@@ -151,6 +151,9 @@ module core import common::*; import csr_pkg::*;(
 	logic csr_redirect_valid;
 	u64   csr_redirect_pc;
 	logic redirect_valid;
+	logic fetch_redirect_valid;
+	logic fetch_redirect_valid_gated;
+	logic fetch_accept;
 	u64   redirect_pc;
 	logic cpu_halt;
 	logic mem_wait;
@@ -260,16 +263,22 @@ module core import common::*; import csr_pkg::*;(
 	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
 	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mem_fault_fire | mret_fire;
 	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? csr_mtvec : csr_mepc;
+	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid | branch_mispredict;
+	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~mem_wait & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
 	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
 	                     (csr_redirect_valid ? csr_redirect_pc : branch_correct_pc);
+	assign fetch_accept = fetch_valid && !fetch_stale && !cpu_halt && !mem_wait &&
+	                     !fetch_redirect_valid_gated && !instr_fault_fire;
 
 	fetch u_fetch(
 		.clk,
 		.reset,
 		.stop_fetch(cpu_halt | mem_wait),
-		.redirect_valid(redirect_valid),
+		.flush(instr_fault_fire),
+		.redirect_valid(fetch_redirect_valid_gated),
 		.redirect_pc(redirect_pc),
+		.fetch_accept(fetch_accept),
 		.current_priv(mmu_priv),
 		.fetch_ok,
 		.fetch_valid,
@@ -694,7 +703,13 @@ module core import common::*; import csr_pkg::*;(
 			priv_mode    <= PRV_M;
 			mmu_priv     <= PRV_M;
 		end else begin
-			mmu_priv <= priv_mode;
+			if (id_ex.valid && fetch_redirect_valid_gated && id_ex.is_ecall) begin
+				mmu_priv <= PRV_M;
+			end else if (id_ex.valid && fetch_redirect_valid_gated && id_ex.is_mret) begin
+				mmu_priv <= mret_target_mode;
+			end else begin
+				mmu_priv <= priv_mode;
+			end
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
 			csr_mcycle <= csr_mcycle + 64'd1;
@@ -912,7 +927,7 @@ module core import common::*; import csr_pkg::*;(
 					id_ex.pred_target<= dec_pred_target;
 
 					// IF/ID
-					if (fetch_valid && !fetch_stale && !cpu_halt) begin
+					if (fetch_accept) begin
 						if_id.valid <= 1'b1;
 						if_id.pc    <= fetch_pc;
 						if_id.instr <= fetch_instr;
