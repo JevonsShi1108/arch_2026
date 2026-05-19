@@ -172,6 +172,8 @@ module core import common::*; import csr_pkg::*;(
 	logic mret_fire;
 	logic trap_redirect_valid;
 	u64   trap_redirect_pc;
+	u64   exec_mepc_view;
+	u64   exec_mtvec_view;
 	u64   ecall_mstatus_new;
 	u64   mret_mstatus_new;
 	u2    mret_target_mode;
@@ -262,7 +264,22 @@ module core import common::*; import csr_pkg::*;(
 	assign instr_fault_fire = fetch_fault & ~cpu_halt;
 	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
 	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mem_fault_fire | mret_fire;
-	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? csr_mtvec : csr_mepc;
+
+	always_comb begin
+		exec_mepc_view  = csr_mepc;
+		exec_mtvec_view = csr_mtvec;
+		if (mem_wb.valid && mem_wb.is_csr && mem_wb.csr_we) begin
+			if (mem_wb.csr_addr == CSR_MEPC)  exec_mepc_view  = mem_wb.csr_new_data;
+			if (mem_wb.csr_addr == CSR_MTVEC) exec_mtvec_view = mem_wb.csr_new_data & MTVEC_MASK;
+		end
+		if (ex_mem.valid && ex_mem.is_csr && ex_mem.csr_we) begin
+			if (ex_mem.csr_addr == CSR_MEPC)  exec_mepc_view  = ex_mem.csr_new_data;
+			if (ex_mem.csr_addr == CSR_MTVEC) exec_mtvec_view = ex_mem.csr_new_data & MTVEC_MASK;
+		end
+	end
+
+	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? exec_mtvec_view :
+	                          exec_mepc_view;
 	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid | branch_mispredict;
 	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~mem_wait & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
@@ -622,6 +639,18 @@ module core import common::*; import csr_pkg::*;(
 	u64   commit_pc, commit_wdata, commit_mem_addr;
 	u32   commit_instr;
 	u5    commit_wdest;
+
+`ifdef VERILATOR
+	localparam u64 JALR_RET_PC = 64'h0000_0000_8000_1f18;
+
+	// Board panic("") path: mret fell through to usertrapret jalr return site.
+	always_ff @(posedge clk) begin
+		if (!reset && mret_fire && (redirect_pc == JALR_RET_PC)) begin
+			$fatal(1, "mret redirect_pc=0x%016h (jalr return), exec_mepc_view=0x%016h csr_mepc=0x%016h",
+			       redirect_pc, exec_mepc_view, csr_mepc);
+		end
+	end
+`endif
 
 `ifdef VERILATOR
 	task automatic debug_log_core(
