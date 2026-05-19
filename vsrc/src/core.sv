@@ -623,7 +623,7 @@ module core import common::*; import csr_pkg::*;(
 	u32   commit_instr;
 	u5    commit_wdest;
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 	task automatic debug_log_core(
 		input string run_id,
 		input string hypothesis_id,
@@ -768,7 +768,7 @@ module core import common::*; import csr_pkg::*;(
 				mmu_priv    <= mret_target_mode;
 			end
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 			// #region agent log
 			if (ex_valid && (ex_out_pc >= 64'h0000_0000_8000_0fa8) && (ex_out_pc <= 64'h0000_0000_8000_1020) &&
 			    (ex_out_is_load || ex_out_is_store || id_ex.is_branch || id_ex.is_jal || id_ex.is_jalr)) begin
@@ -779,7 +779,7 @@ module core import common::*; import csr_pkg::*;(
 			// #endregion
 `endif
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 			// #region agent log
 			if (mem_wait && (mem_wait_cycles == 8'd32)) begin
 				debug_log_core("pre-fix", "H1", "core.sv:memwait_long", "mem_wait stayed high for 32 cycles",
@@ -801,7 +801,7 @@ module core import common::*; import csr_pkg::*;(
 			commit_skip    <= mem_wb.valid & mem_wb.is_mmio & (mem_wb.is_load | mem_wb.is_store);
 			commit_mem_addr<= mem_wb.mem_addr;
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 			// #region agent log
 			if (wb_is_trap || cpu_halt) begin
 				debug_log_core("pre-fix", "H5", "core.sv:trap_or_halt", "trap or halt reached in WB path",
@@ -821,7 +821,7 @@ module core import common::*; import csr_pkg::*;(
 				// 访存未完成：冻结前级，避免重复发射与乱序提交
 				mem_wb.valid <= 1'b0;
 			end else begin
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 				// #region agent log
 				if (branch_mispredict) begin
 					debug_log_core("pre-fix", "H3", "core.sv:branch_flush", "execute reported branch mispredict",
@@ -831,7 +831,7 @@ module core import common::*; import csr_pkg::*;(
 				// #endregion
 `endif
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
 				// #region agent log
 				if (load_use_hazard && ex_valid) begin
 					debug_log_core("pre-fix", "H2", "core.sv:hazard_overlap", "load-use hazard overlapped with EX advance",

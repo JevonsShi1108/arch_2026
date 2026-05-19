@@ -104,7 +104,7 @@ module mem_stage import common::*;(
         end
     endfunction
 
-`ifndef SYNTHESIS
+`ifdef VERILATOR
     task automatic debug_log_mem(
         input string run_id,
         input string hypothesis_id,
@@ -211,7 +211,7 @@ module mem_stage import common::*;(
 
     always_ff @(posedge clk) begin
         if (reset || flush) begin
-`ifndef SYNTHESIS
+`ifdef VERILATOR
             if (pending) begin
                 debug_log_mem("pre-fix", "H1", "mem.sv:flush_clear", "flush/reset cleared pending request",
                               pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);
@@ -223,7 +223,7 @@ module mem_stage import common::*;(
         end else begin
             data_ok_prev_q <= dresp.data_ok;
             if (!pending && in_valid && (in_is_load || in_is_store) && !resp_fire && !dresp.fault) begin
-`ifndef SYNTHESIS
+`ifdef VERILATOR
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_set", "request entered pending wait",
                               in_pc, in_mem_addr, in_is_load, in_is_store, dresp.data_ok, pending);
 `endif
@@ -243,7 +243,7 @@ module mem_stage import common::*;(
                 pend_is_trap        <= in_is_trap;
                 req_priv_q          <= current_priv;
             end else if (pending && (resp_fire || dresp.fault)) begin
-`ifndef SYNTHESIS
+`ifdef VERILATOR
                 debug_log_mem("pre-fix", "H1", "mem.sv:pending_clear", "pending request observed data_ok",
                               pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);
 `endif
