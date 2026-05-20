@@ -14,15 +14,15 @@ module predictor_static import common::*;(
     output logic pred_taken,
     output u64   pred_target
 );
-    // 条件分支：Always-Not-Taken；JAL/JALR：Always-Taken（目标由译码级提供）。
+    // JAL/JALR：Always-Taken；条件分支：向后跳转（target < pc）预测 Taken。
     logic [63:0] pc_plus4;
     logic        jump_pred;
-    assign pc_plus4   = pc + 64'd4;
-    assign jump_pred  = is_jal | is_jalr;
-    assign pred_taken = jump_pred;
-    assign pred_target = jump_pred ? target : pc_plus4;
-
-    `UNUSED_OK({is_branch})
+    logic        branch_backward;
+    assign pc_plus4        = pc + 64'd4;
+    assign jump_pred       = is_jal | is_jalr;
+    assign branch_backward = is_branch && (target < pc);
+    assign pred_taken      = jump_pred | branch_backward;
+    assign pred_target     = (jump_pred | branch_backward) ? target : pc_plus4;
 endmodule
 
 `endif

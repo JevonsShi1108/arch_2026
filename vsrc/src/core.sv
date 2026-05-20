@@ -293,16 +293,27 @@ module core import common::*; import csr_pkg::*;(
 	                          exec_mepc_view;
 
 	logic decode_jal_redirect;
+	logic decode_branch_redirect;
+	logic decode_pred_redirect;
+	logic pipeline_flush_young;
+	logic ex_mem_is_wrong_path;
+	logic suppress_wrong_path_wb;
+
 	assign decode_jal_redirect = if_id.valid && (dec_is_jal || dec_is_jalr) && ~mem_wait && ~cpu_halt;
+	assign decode_branch_redirect = if_id.valid && dec_is_branch && dec_pred_taken && ~mem_wait && ~cpu_halt;
+	assign decode_pred_redirect = decode_jal_redirect | decode_branch_redirect;
+	assign pipeline_flush_young = branch_mispredict | csr_redirect_valid | trap_redirect_valid;
+	assign ex_mem_is_wrong_path = ex_mem.valid && id_ex.valid && (ex_mem.pc == (id_ex.pc + 64'd4));
+	assign suppress_wrong_path_wb = pipeline_flush_young && ex_mem_is_wrong_path;
 
 	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid |
-	                              branch_mispredict | decode_jal_redirect;
+	                              branch_mispredict | decode_pred_redirect;
 	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~mem_wait & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
 	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
 	                     (csr_redirect_valid ? csr_redirect_pc :
 	                     (branch_mispredict ? branch_correct_pc :
-	                     (decode_jal_redirect ? dec_pred_target : 64'd0)));
+	                     (decode_pred_redirect ? dec_pred_target : 64'd0)));
 	assign fetch_accept = fetch_valid && !fetch_stale && !cpu_halt && !mem_wait &&
 	                     !fetch_redirect_valid_gated && !instr_fault_fire;
 
@@ -983,52 +994,60 @@ module core import common::*; import csr_pkg::*;(
 				// #endregion
 `endif
 
-				// WB pipeline register
-				mem_wb.valid    <= mem_out_valid;
-				mem_wb.pc       <= mem_out_pc;
-				mem_wb.instr    <= mem_out_instr;
-				mem_wb.rd       <= mem_out_rd;
-				mem_wb.reg_write<= mem_out_reg_write;
-				mem_wb.result   <= mem_out_result;
-				mem_wb.is_load  <= mem_out_is_load;
-				mem_wb.is_store <= mem_out_is_store;
-				mem_wb.is_mmio  <= mem_out_is_mmio;
-				mem_wb.mem_addr <= mem_out_mem_addr;
-				mem_wb.is_ebreak<= mem_out_is_ebreak;
-				mem_wb.is_trap  <= mem_out_is_trap;
-				mem_wb.is_csr   <= ex_mem.is_csr;
-				mem_wb.csr_we   <= ex_mem.csr_we;
-				mem_wb.csr_addr <= ex_mem.csr_addr;
-				mem_wb.csr_old_data <= ex_mem.csr_old_data;
-				mem_wb.csr_new_data <= ex_mem.csr_new_data;
+				// WB pipeline register（错预测/CSR/trap 时不提交 fall-through 槽中的误路径指令）
+				if (suppress_wrong_path_wb) begin
+					mem_wb.valid <= 1'b0;
+				end else begin
+					mem_wb.valid    <= mem_out_valid;
+					mem_wb.pc       <= mem_out_pc;
+					mem_wb.instr    <= mem_out_instr;
+					mem_wb.rd       <= mem_out_rd;
+					mem_wb.reg_write<= mem_out_reg_write;
+					mem_wb.result   <= mem_out_result;
+					mem_wb.is_load  <= mem_out_is_load;
+					mem_wb.is_store <= mem_out_is_store;
+					mem_wb.is_mmio  <= mem_out_is_mmio;
+					mem_wb.mem_addr <= mem_out_mem_addr;
+					mem_wb.is_ebreak<= mem_out_is_ebreak;
+					mem_wb.is_trap  <= mem_out_is_trap;
+					mem_wb.is_csr   <= ex_mem.is_csr;
+					mem_wb.csr_we   <= ex_mem.csr_we;
+					mem_wb.csr_addr <= ex_mem.csr_addr;
+					mem_wb.csr_old_data <= ex_mem.csr_old_data;
+					mem_wb.csr_new_data <= ex_mem.csr_new_data;
+				end
 
 				// MEM pipeline register
-				ex_mem.valid     <= ex_valid;
-				ex_mem.pc        <= ex_out_pc;
-				ex_mem.instr     <= ex_out_instr;
-				ex_mem.rd        <= ex_out_rd;
-				ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
-				ex_mem.result    <= ex_result_final;
-				ex_mem.is_load   <= ex_out_is_load;
-				ex_mem.is_store  <= ex_out_is_store;
-				ex_mem.mem_size  <= ex_out_mem_size;
-				ex_mem.load_unsigned <= ex_out_load_unsigned;
-				ex_mem.mem_addr  <= ex_out_mem_addr;
-				ex_mem.store_data<= ex_out_store_data;
-				ex_mem.is_ebreak <= ex_out_is_ebreak;
-				ex_mem.is_trap   <= ex_out_is_trap;
-				ex_mem.is_csr    <= id_ex.is_csr;
-				ex_mem.csr_we    <= ex_csr_we;
-				ex_mem.csr_addr  <= id_ex.csr_addr;
-				ex_mem.csr_old_data <= ex_csr_old_data;
-				ex_mem.csr_new_data <= ex_csr_new_data;
+				if (suppress_wrong_path_wb) begin
+					ex_mem.valid <= 1'b0;
+				end else begin
+					ex_mem.valid     <= ex_valid;
+					ex_mem.pc        <= ex_out_pc;
+					ex_mem.instr     <= ex_out_instr;
+					ex_mem.rd        <= ex_out_rd;
+					ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
+					ex_mem.result    <= ex_result_final;
+					ex_mem.is_load   <= ex_out_is_load;
+					ex_mem.is_store  <= ex_out_is_store;
+					ex_mem.mem_size  <= ex_out_mem_size;
+					ex_mem.load_unsigned <= ex_out_load_unsigned;
+					ex_mem.mem_addr  <= ex_out_mem_addr;
+					ex_mem.store_data<= ex_out_store_data;
+					ex_mem.is_ebreak <= ex_out_is_ebreak;
+					ex_mem.is_trap   <= ex_out_is_trap;
+					ex_mem.is_csr    <= id_ex.is_csr;
+					ex_mem.csr_we    <= ex_csr_we;
+					ex_mem.csr_addr  <= id_ex.csr_addr;
+					ex_mem.csr_old_data <= ex_csr_old_data;
+					ex_mem.csr_new_data <= ex_csr_new_data;
+				end
 
-				if (branch_mispredict || csr_redirect_valid || trap_redirect_valid) begin
-					// 冲刷水线中所有年轻指令
+				if (pipeline_flush_young) begin
+					// 冲刷 IF/ID 与 ID/EX 中的年轻误路径
 					if_id.valid <= 1'b0;
 					id_ex.valid <= 1'b0;
-				end else if (decode_jal_redirect) begin
-					// JAL/JALR：将跳转指令送入 EX，取指重定向到目标，丢弃 fall-through
+				end else if (decode_pred_redirect) begin
+					// 预测跳转（JAL/JALR/向后分支）：送入 EX 并重定向取指
 					id_ex.valid      <= 1'b1;
 					id_ex.pc         <= if_id.pc;
 					id_ex.instr      <= if_id.instr;
