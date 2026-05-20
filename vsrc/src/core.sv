@@ -128,6 +128,10 @@ module core import common::*; import csr_pkg::*;(
 	localparam int MSTATUS_SPP_BIT  = 8;
 	localparam int MSTATUS_MPP_LSB  = 11;
 	localparam int MSTATUS_MPP_MSB  = 12;
+	localparam int MSTATUS_FS_LSB  = 13;
+	localparam int MSTATUS_FS_MSB  = 14;
+	localparam int MSTATUS_XS_LSB  = 15;
+	localparam int MSTATUS_XS_MSB  = 16;
 	localparam int MSTATUS_MPRV_BIT = 17;
 	localparam u2 CSR_OP_NONE  = 2'd0;
 	localparam u2 CSR_OP_WRITE = 2'd1;
@@ -178,6 +182,36 @@ module core import common::*; import csr_pkg::*;(
 	u64   mret_mstatus_new;
 	u2    mret_target_mode;
 	u64   ecall_mcause;
+	// Lab6: external interrupt lines -> mip bits (MEIP=11, MTIP=7, MSIP=3)
+	localparam u64 MIP_EXT_MTIP = 64'h80;
+	localparam u64 MIP_EXT_MSIP = 64'h8;
+	localparam u64 MIP_EXT_MEIP = 64'h800;
+	localparam u64 MCAUSE_INT_MEI = 64'h8000_0000_0000_000b;
+	localparam u64 MCAUSE_INT_MSI = 64'h8000_0000_0000_0003;
+	localparam u64 MCAUSE_INT_MTI = 64'h8000_0000_0000_0007;
+
+	logic dec_is_illegal;
+	logic instr_misalign_fire;
+	logic illegal_fire;
+	logic mem_misalign_fire;
+	logic mem_out_page_fault;
+	logic mem_out_misalign_fault;
+	logic interrupt_fire;
+	u64   mip_ext;
+	u64   mip_for_read;
+	logic irq_eligible;
+	logic irq_active;
+	logic irq_active_prev;
+	logic csrsi_opens_mie_ex;
+	logic mie_effective;
+	u64   irq_masked;
+	logic irq_mei, irq_msi, irq_mti;
+	u64   irq_mcause_sel;
+	u64   irq_mepc_pc;
+	u64   arch_pc_q;
+	u64   arch_pc_next;
+	logic ifetch_trap_flush;
+	logic any_sync_trap_to_mtvec;
 
 	function automatic u64 set_mstatus_field(
 		input u64 old_val_i,
@@ -258,10 +292,10 @@ module core import common::*; import csr_pkg::*;(
 	endfunction
 
 	function automatic logic csr_write_needs_flush(input u12 csr_addr_i);
+		// 仅 SATP 需要 redirect+冲刷（页表切换）。MSTATUS/MTVEC 走正常五级流水写回；
+		// 若对它们 redirect，背靠背 CSR（m_trap 的 csrsi/csrci、csrw mtvec）会在写回前被冲掉。
 		begin
 			unique case (csr_addr_i)
-				CSR_MSTATUS,
-				CSR_MTVEC,
 				CSR_SATP: csr_write_needs_flush = 1'b1;
 				default:  csr_write_needs_flush = 1'b0;
 			endcase
@@ -271,10 +305,71 @@ module core import common::*; import csr_pkg::*;(
 	assign csr_mhartid = 64'd0;
 	assign priv_mode_o = mmu_priv;
 	assign satp_o = csr_satp;
+	assign mip_ext = (trint ? MIP_EXT_MTIP : 64'd0) |
+	                 (swint ? MIP_EXT_MSIP : 64'd0) |
+	                 (exint ? MIP_EXT_MEIP : 64'd0);
+
 	assign ecall_fire = id_ex.valid & id_ex.is_ecall & ~mem_wait & ~cpu_halt;
 	assign instr_fault_fire = fetch_fault & ~cpu_halt;
 	assign mret_fire  = id_ex.valid & id_ex.is_mret  & ~mem_wait & ~cpu_halt;
-	assign trap_redirect_valid = ecall_fire | instr_fault_fire | mem_fault_fire | mret_fire;
+
+	assign instr_misalign_fire = fetch_valid & (fetch_pc[1:0] != 2'b00) & ~cpu_halt;
+	assign illegal_fire = if_id.valid & dec_is_illegal & ~mem_wait & ~cpu_halt;
+	assign mem_fault_fire = mem_out_valid & mem_out_page_fault & ~cpu_halt;
+	assign mem_misalign_fire = mem_out_valid & mem_out_misalign_fault & ~cpu_halt;
+
+	assign ifetch_trap_flush = instr_fault_fire | instr_misalign_fire;
+
+	// mip 读路径合并 CLINT/PLIC 行（csr_fwd_mip 在下方 always_comb 中赋值）
+	assign mip_for_read = (csr_fwd_mip & MIP_MASK) | mip_ext;
+
+	// m_trap 窗口：csrsi 在 ex_mem 置 MIE 的当拍，csrci 必在 id_ex（pc+4）；勿在 mem_wb 拍触发（id_ex 已是 bgez）
+	assign csrsi_opens_mie_ex = ex_mem.valid & ex_mem.is_csr & ex_mem.csr_we &
+	                           (ex_mem.csr_addr == CSR_MSTATUS) &
+	                           ex_mem.csr_new_data[MSTATUS_MIE_BIT] &
+	                           ~ex_mem.csr_old_data[MSTATUS_MIE_BIT];
+	assign mie_effective = csr_mstatus[MSTATUS_MIE_BIT] | csrsi_opens_mie_ex;
+	assign irq_eligible = (priv_mode != PRV_M) || mie_effective;
+	assign irq_masked = mip_for_read & csr_mie;
+	assign irq_mei = irq_eligible & irq_masked[11];
+	assign irq_msi = irq_eligible & irq_masked[3];
+	assign irq_mti = irq_eligible & irq_masked[7];
+	assign irq_active = irq_mei | irq_msi | irq_mti;
+	// U 态：pending 边沿。M 态：csrsi 在 ex_mem 当拍（与 csrci@id_ex 配对，mepc=ex_mem.pc+4）
+	assign interrupt_fire = irq_active & ~mem_wait & ~cpu_halt &
+	                          ((priv_mode == PRV_M) ? csrsi_opens_mie_ex : !irq_active_prev);
+
+	always_comb begin
+		irq_mcause_sel = MCAUSE_INT_MTI;
+		if (irq_mei) irq_mcause_sel = MCAUSE_INT_MEI;
+		else if (irq_msi) irq_mcause_sel = MCAUSE_INT_MSI;
+		else if (irq_mti) irq_mcause_sel = MCAUSE_INT_MTI;
+	end
+
+	// 中断 mepc：csrsi@ex_mem 当拍固定为下一条 csrci（int_allow = ex_mem.pc+4）
+	always_comb begin
+		if (csrsi_opens_mie_ex)
+			arch_pc_next = ex_mem.pc + 64'd4;
+		else if (id_ex.valid)
+			arch_pc_next = id_ex.pc;
+		else if (ex_mem.valid & ex_mem.is_csr & (ex_mem.csr_addr == CSR_MSTATUS))
+			arch_pc_next = ex_mem.pc;
+		else if (ex_mem.valid)
+			arch_pc_next = ex_mem.pc;
+		else if (if_id.valid)
+			arch_pc_next = if_id.pc;
+		else if (fetch_valid)
+			arch_pc_next = fetch_pc;
+		else
+			arch_pc_next = arch_pc_q;
+	end
+	assign irq_mepc_pc = arch_pc_next;
+
+	// 同步异常/中断仲裁（高优先级在前，与 Table 103 大致一致）；mret 单独处理
+	assign any_sync_trap_to_mtvec = interrupt_fire | mem_fault_fire | mem_misalign_fire |
+	                                instr_misalign_fire | instr_fault_fire | illegal_fire | ecall_fire;
+
+	assign trap_redirect_valid = mret_fire | any_sync_trap_to_mtvec;
 
 	always_comb begin
 		exec_mepc_view  = csr_mepc;
@@ -289,8 +384,8 @@ module core import common::*; import csr_pkg::*;(
 		end
 	end
 
-	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? exec_mtvec_view :
-	                          exec_mepc_view;
+	assign trap_redirect_pc = mret_fire ? exec_mepc_view :
+	                          (any_sync_trap_to_mtvec ? exec_mtvec_view : 64'd0);
 
 	logic decode_jal_redirect;
 	logic decode_branch_redirect;
@@ -305,10 +400,23 @@ module core import common::*; import csr_pkg::*;(
 	assign decode_branch_redirect = if_id.valid && dec_is_branch && dec_pred_taken && ~cpu_halt;
 	assign decode_pred_redirect = decode_jal_redirect | decode_branch_redirect;
 	assign pipeline_flush_young = branch_mispredict | csr_redirect_valid | trap_redirect_valid;
-	assign ex_mem_is_wrong_path = ex_mem.valid && id_ex.valid && (ex_mem.pc == (id_ex.pc + 64'd4));
-	assign suppress_wrong_path_wb = pipeline_flush_young && ex_mem_is_wrong_path;
+	// csrsi@pc + csrci@pc+4 是 m_trap 故意背靠背写 MSTATUS，不是误路径
+	logic ex_id_seq_csr_mstatus;
+	assign ex_id_seq_csr_mstatus = ex_mem.valid & id_ex.valid & (ex_mem.pc + 64'd4 == id_ex.pc) &
+	                               ex_mem.is_csr & id_ex.is_csr &
+	                               (ex_mem.csr_addr == CSR_MSTATUS) & (id_ex.csr_addr == CSR_MSTATUS);
+	// m_trap 循环：csrci@pc+4 后紧跟 bgez；分支预测 redirect 时不能把 csrci 当误路径抑制写回，
+	// 否则 MIE 永远清不掉，csrsi_opens_mie_ex 恒为 0，M 态定时器中断永不触发。
+	logic ex_mem_mstatus_csr_seq;
+	assign ex_mem_mstatus_csr_seq = ex_mem.valid & id_ex.valid & (ex_mem.pc + 64'd4 == id_ex.pc) &
+	                                ex_mem.is_csr & ex_mem.csr_we & (ex_mem.csr_addr == CSR_MSTATUS);
+	assign ex_mem_is_wrong_path = ex_mem.valid & id_ex.valid & (ex_mem.pc + 64'd4 == id_ex.pc) &
+	                              ~ex_id_seq_csr_mstatus & ~ex_mem_mstatus_csr_seq;
+	// 取中断当拍勿 suppress：常见形态为 ex_mem=csrci、id_ex=bgez，仍需正确 mepc
+	assign suppress_wrong_path_wb = pipeline_flush_young & ex_mem_is_wrong_path & ~interrupt_fire;
 
-	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid |
+	assign fetch_redirect_valid = ecall_fire | illegal_fire | mem_fault_fire | mem_misalign_fire |
+	                              interrupt_fire | mret_fire | csr_redirect_valid |
 	                              branch_mispredict | decode_pred_redirect;
 	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
@@ -317,7 +425,7 @@ module core import common::*; import csr_pkg::*;(
 	                     (branch_mispredict ? branch_correct_pc :
 	                     (decode_pred_redirect ? dec_pred_target : 64'd0)));
 	assign fetch_accept = fetch_valid && !fetch_stale && !cpu_halt && !mem_wait &&
-	                     !fetch_redirect_valid_gated && !instr_fault_fire && !muldiv_stall;
+	                     !fetch_redirect_valid_gated && !ifetch_trap_flush && !muldiv_stall;
 
 	logic stop_fetch;
 	assign stop_fetch = cpu_halt;
@@ -326,7 +434,7 @@ module core import common::*; import csr_pkg::*;(
 		.clk,
 		.reset,
 		.stop_fetch,
-		.flush(instr_fault_fire),
+		.flush(ifetch_trap_flush),
 		.redirect_valid(fetch_redirect_valid_gated),
 		.redirect_pc(redirect_pc),
 		.fetch_accept(fetch_accept),
@@ -381,6 +489,7 @@ module core import common::*; import csr_pkg::*;(
 		.load_unsigned(dec_load_unsigned),
 		.is_ebreak(dec_is_ebreak),
 		.is_trap(dec_is_trap),
+		.is_illegal(dec_is_illegal),
 		.is_ecall(dec_is_ecall),
 		.is_mret(dec_is_mret),
 		.is_muldiv(dec_is_muldiv),
@@ -639,7 +748,7 @@ module core import common::*; import csr_pkg::*;(
 		id_ex.csr_addr,
 		csr_fwd_mstatus,
 		csr_fwd_mtvec,
-		csr_fwd_mip,
+		mip_for_read,
 		csr_fwd_mie,
 		csr_fwd_mscratch,
 		csr_fwd_mcause,
@@ -669,6 +778,8 @@ module core import common::*; import csr_pkg::*;(
 
 	always_comb begin
 		ecall_mstatus_new = csr_mstatus;
+		// 必须存 arch MIE，不能存 mie_effective：m_trap 在 csrsi 当拍触发时 reg 里 MIE 仍为 0，
+		// 若把 MPIE 存成 1，mret 会全局打开 MIE，后续 csrsi 再无 0→1 边沿，只能进一次 handler。
 		ecall_mstatus_new[MSTATUS_MPIE_BIT] = csr_mstatus[MSTATUS_MIE_BIT];
 		ecall_mstatus_new[MSTATUS_MIE_BIT] = 1'b0;
 		ecall_mstatus_new = set_mstatus_field(ecall_mstatus_new, MSTATUS_MPP_LSB, MSTATUS_MPP_MSB, {62'd0, priv_mode});
@@ -681,12 +792,13 @@ module core import common::*; import csr_pkg::*;(
 		if (mret_target_mode != PRV_M) begin
 			mret_mstatus_new[MSTATUS_MPRV_BIT] = 1'b0;
 		end
+		// Lab6: mret 清除 XS（RISC-V 特权规范）
+		mret_mstatus_new[MSTATUS_XS_MSB:MSTATUS_XS_LSB] = 2'b00;
 	end
 
 	// MEM
 	logic mem_out_valid, mem_out_reg_write, mem_out_is_load, mem_out_is_store, mem_out_is_ebreak, mem_out_is_trap;
 	logic mem_out_is_mmio;
-	logic mem_out_fault;
 	logic mem_out_fault_is_store;
 	u64   mem_out_pc, mem_out_result;
 	u64   mem_out_mem_addr;
@@ -725,13 +837,13 @@ module core import common::*; import csr_pkg::*;(
 		.out_is_load(mem_out_is_load),
 		.out_is_store(mem_out_is_store),
 		.out_mem_addr(mem_out_mem_addr),
-		.out_fault(mem_out_fault),
+		.out_fault(mem_out_page_fault),
+		.out_misaligned(mem_out_misalign_fault),
 		.out_fault_is_store(mem_out_fault_is_store),
 		.out_is_ebreak(mem_out_is_ebreak),
 		.out_is_trap(mem_out_is_trap),
 		.out_is_mmio(mem_out_is_mmio)
 	);
-	assign mem_fault_fire = mem_out_valid & mem_out_fault & ~cpu_halt;
 	assign mem_fault_is_store = mem_out_fault_is_store;
 	assign mem_fault_pc = mem_out_pc;
 	assign mem_fault_addr = mem_out_mem_addr;
@@ -776,36 +888,6 @@ module core import common::*; import csr_pkg::*;(
 			       redirect_pc, exec_mepc_view, csr_mepc);
 		end
 	end
-`endif
-
-`ifdef VERILATOR
-	task automatic debug_log_core(
-		input string run_id,
-		input string hypothesis_id,
-		input string location,
-		input string message,
-		input u64 pc,
-		input u64 addr,
-		input u64 extra0,
-		input u64 extra1,
-		input logic flag0,
-		input logic flag1,
-		input logic flag2
-	);
-		integer fd;
-		string payload;
-		begin
-			fd = $fopen("/home/jevonsshi/arch_2026/.cursor/debug-f06466.log", "a");
-			if (fd != 0) begin
-				payload = $sformatf(
-					"{\"sessionId\":\"f06466\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"pc\":\"0x%016h\",\"addr\":\"0x%016h\",\"extra0\":\"0x%016h\",\"extra1\":\"0x%016h\",\"flag0\":%0d,\"flag1\":%0d,\"flag2\":%0d},\"timestamp\":%0t}",
-					run_id, hypothesis_id, location, message, pc, addr, extra0, extra1, flag0, flag1, flag2, $time
-				);
-				$fdisplay(fd, "%s", payload);
-				$fclose(fd);
-			end
-		end
-	endtask
 `endif
 
 	// Pipeline registers update
@@ -871,11 +953,17 @@ module core import common::*; import csr_pkg::*;(
 			csr_satp     <= 64'd0;
 			priv_mode    <= PRV_M;
 			mmu_priv     <= PRV_M;
+			irq_active_prev <= 1'b0;
+			arch_pc_q       <= PCINIT;
 		end else begin
-			if (id_ex.valid && fetch_redirect_valid_gated && id_ex.is_ecall) begin
-				mmu_priv <= PRV_M;
-			end else if (id_ex.valid && fetch_redirect_valid_gated && id_ex.is_mret) begin
+			arch_pc_q <= arch_pc_next;
+			if (id_ex.valid && fetch_redirect_valid_gated && id_ex.is_mret) begin
 				mmu_priv <= mret_target_mode;
+			end else if (fetch_redirect_valid_gated && (
+			           interrupt_fire | illegal_fire | instr_misalign_fire | instr_fault_fire |
+			           mem_fault_fire | mem_misalign_fire |
+			           (id_ex.valid && id_ex.is_ecall))) begin
+				mmu_priv <= PRV_M;
 			end else begin
 				mmu_priv <= priv_mode;
 			end
@@ -913,7 +1001,53 @@ module core import common::*; import csr_pkg::*;(
 			end else begin
 				mem_wait_cycles <= '0;
 			end
-			if (mem_wb.valid && mem_wb.is_csr && mem_wb.csr_we) begin
+			if (mret_fire) begin
+				csr_mstatus <= mret_mstatus_new;
+				priv_mode   <= mret_target_mode;
+			end else if (interrupt_fire) begin
+				csr_mepc    <= irq_mepc_pc;
+				csr_mcause  <= irq_mcause_sel;
+				csr_mtval   <= 64'd0;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (mem_fault_fire) begin
+				csr_mepc    <= mem_fault_pc;
+				csr_mcause  <= mem_fault_is_store ? 64'd15 : 64'd13;
+				csr_mtval   <= mem_fault_addr;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (mem_misalign_fire) begin
+				csr_mepc    <= mem_fault_pc;
+				csr_mcause  <= mem_fault_is_store ? 64'd6 : 64'd4;
+				csr_mtval   <= mem_fault_addr;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (instr_misalign_fire) begin
+				csr_mepc    <= fetch_pc;
+				csr_mcause  <= 64'd0;
+				csr_mtval   <= fetch_pc;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (instr_fault_fire) begin
+				csr_mepc    <= fetch_pc;
+				csr_mcause  <= 64'd12;
+				csr_mtval   <= fetch_pc;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (illegal_fire) begin
+				csr_mepc    <= if_id.pc;
+				csr_mcause  <= 64'd2;
+				csr_mtval   <= {32'd0, if_id.instr};
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (ecall_fire) begin
+				csr_mepc    <= id_ex.pc;
+				csr_mcause  <= ecall_mcause;
+				csr_mtval   <= 64'd0;
+				csr_mstatus <= ecall_mstatus_new;
+				priv_mode   <= PRV_M;
+			end else if (mem_wb.valid && mem_wb.is_csr && mem_wb.csr_we) begin
+				// 必须排在 trap 之后，避免中断当拍 csrsi 的 WB 把 MIE 写回 1 盖掉 trap 清零
 				unique case (mem_wb.csr_addr)
 					CSR_MSTATUS:  csr_mstatus  <= mem_wb.csr_new_data;
 					CSR_MTVEC:    csr_mtvec    <= mem_wb.csr_new_data;
@@ -930,59 +1064,13 @@ module core import common::*; import csr_pkg::*;(
 				endcase
 			end
 
-			if (ecall_fire) begin
-				csr_mepc    <= id_ex.pc;
-				csr_mcause  <= ecall_mcause;
-				csr_mtval   <= 64'd0;
-				csr_mstatus <= ecall_mstatus_new;
-				priv_mode   <= PRV_M;
-				mmu_priv    <= PRV_M;
+			if (!mem_wait) begin
+				if (interrupt_fire) begin
+					irq_active_prev <= 1'b1;
+				end else begin
+					irq_active_prev <= irq_active;
+				end
 			end
-
-			if (instr_fault_fire) begin
-				csr_mepc    <= fetch_pc;
-				csr_mcause  <= 64'd12;
-				csr_mtval   <= fetch_pc;
-				csr_mstatus <= ecall_mstatus_new;
-				priv_mode   <= PRV_M;
-				mmu_priv    <= PRV_M;
-			end
-
-			if (mem_fault_fire) begin
-				csr_mepc    <= mem_fault_pc;
-				csr_mcause  <= mem_fault_is_store ? 64'd15 : 64'd13;
-				csr_mtval   <= mem_fault_addr;
-				csr_mstatus <= ecall_mstatus_new;
-				priv_mode   <= PRV_M;
-				mmu_priv    <= PRV_M;
-			end
-
-			if (mret_fire) begin
-				csr_mstatus <= mret_mstatus_new;
-				priv_mode   <= mret_target_mode;
-				mmu_priv    <= mret_target_mode;
-			end
-
-`ifdef VERILATOR
-			// #region agent log
-			if (ex_valid && (ex_out_pc >= 64'h0000_0000_8000_0fa8) && (ex_out_pc <= 64'h0000_0000_8000_1020) &&
-			    (ex_out_is_load || ex_out_is_store || id_ex.is_branch || id_ex.is_jal || id_ex.is_jalr)) begin
-				debug_log_core("pre-fix", "H4", "core.sv:exec_window", "execute window around stuck PC",
-				               ex_out_pc, ex_out_mem_addr, id_ex.op1, id_ex.imm,
-				               ex_out_is_load, ex_out_is_store, branch_mispredict);
-			end
-			// #endregion
-`endif
-
-`ifdef VERILATOR
-			// #region agent log
-			if (mem_wait && (mem_wait_cycles == 8'd32)) begin
-				debug_log_core("pre-fix", "H1", "core.sv:memwait_long", "mem_wait stayed high for 32 cycles",
-				               ex_mem.pc, ex_mem.mem_addr, {63'd0, dreq.valid}, {62'd0, dresp.data_ok, mem_out_valid},
-				               ex_mem.is_load, ex_mem.is_store, cpu_halt);
-			end
-			// #endregion
-`endif
 
 			// commit 寄存：将 WB 提交点打一拍后提供给 Difftest
 			commit_valid   <= wb_valid & !cpu_halt;
@@ -996,15 +1084,6 @@ module core import common::*; import csr_pkg::*;(
 			commit_skip    <= mem_wb.valid & mem_wb.is_mmio & (mem_wb.is_load | mem_wb.is_store);
 			commit_mem_addr<= mem_wb.mem_addr;
 
-`ifdef VERILATOR
-			// #region agent log
-			if (wb_is_trap || cpu_halt) begin
-				debug_log_core("pre-fix", "H5", "core.sv:trap_or_halt", "trap or halt reached in WB path",
-				               wb_pc, mem_wb.mem_addr, cycle_cnt, instr_cnt, wb_is_trap, cpu_halt, wb_valid);
-			end
-			// #endregion
-`endif
-
 			if (wb_is_trap) begin
 				// trap 指令在 WB 到达后，下一周期彻底停机，避免继续提交
 				cpu_halt     <= 1'b1;
@@ -1015,28 +1094,12 @@ module core import common::*; import csr_pkg::*;(
 			end else if (mem_wait) begin
 				mem_wb.valid <= 1'b0;
 			end else begin
-`ifdef VERILATOR
-				// #region agent log
-				if (branch_mispredict) begin
-					debug_log_core("pre-fix", "H3", "core.sv:branch_flush", "execute reported branch mispredict",
-					               ex_out_pc, branch_correct_pc, id_ex.pred_target, ex_out_mem_addr,
-					               id_ex.pred_taken, ex_valid, ex_out_is_store);
-				end
-				// #endregion
-`endif
-
-`ifdef VERILATOR
-				// #region agent log
-				if (load_use_hazard && ex_valid) begin
-					debug_log_core("pre-fix", "H2", "core.sv:hazard_overlap", "load-use hazard overlapped with EX advance",
-					               if_id.pc, ex_mem.mem_addr, id_ex.pc, ex_out_mem_addr,
-					               load_use_hazard_idex, load_use_hazard_exmem, ex_valid);
-				end
-				// #endregion
-`endif
-
 				// WB pipeline register（错预测/CSR/trap 时不提交 fall-through 槽中的误路径指令）
-				if (suppress_wrong_path_wb) begin
+				// m_trap_test 里中断可能在 mstatus CSR 指令窗口命中。若该 CSR 写回延后覆盖 trap
+				// 当拍写入的 MPP/MPIE，会把 mret 返回特权级破坏成 U，后续定时器中断序列失真。
+				if (suppress_wrong_path_wb ||
+				    (interrupt_fire && ex_mem.valid && ex_mem.is_csr && ex_mem.csr_we &&
+				     (ex_mem.csr_addr == CSR_MSTATUS))) begin
 					mem_wb.valid <= 1'b0;
 				end else begin
 					mem_wb.valid    <= mem_out_valid;
@@ -1070,7 +1133,9 @@ module core import common::*; import csr_pkg::*;(
 						ex_mem.pc        <= ex_out_pc;
 						ex_mem.instr     <= ex_out_instr;
 						ex_mem.rd        <= ex_out_rd;
-						ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
+						ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire &
+						                    ~instr_misalign_fire & ~illegal_fire & ~interrupt_fire &
+						                    ~mem_fault_fire & ~mem_misalign_fire;
 						ex_mem.result    <= ex_result_final;
 						ex_mem.is_load   <= ex_out_is_load;
 						ex_mem.is_store  <= ex_out_is_store;
@@ -1186,7 +1251,7 @@ module core import common::*; import csr_pkg::*;(
 		end
 	end
 
-	`UNUSED_OK({trint, swint, exint, fetch_ok, wb_is_ebreak, rf_next_reg[0]})
+	`UNUSED_OK({fetch_ok, wb_is_ebreak, rf_next_reg[0]})
 
 `ifdef VERILATOR
 	DifftestInstrCommit DifftestInstrCommit(
@@ -1266,7 +1331,7 @@ module core import common::*; import csr_pkg::*;(
 		.mcause             (csr_mcause),
 		.scause             (0),
 		.satp               (csr_satp),
-		.mip                (csr_mip & MIP_MASK),
+		.mip                (mip_for_read),
 		.mie                (csr_mie),
 		.mscratch           (csr_mscratch),
 		.sscratch           (0),

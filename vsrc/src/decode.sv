@@ -28,6 +28,7 @@ module decode import common::*;(
     output logic load_unsigned,
     output logic is_ebreak,
     output logic is_trap,
+    output logic is_illegal,
     output logic is_ecall,
     output logic is_mret,
     output logic is_muldiv,
@@ -95,6 +96,7 @@ module decode import common::*;(
         load_unsigned = 1'b0;
         is_ebreak = 1'b0;
         is_trap   = 1'b0;
+        is_illegal = 1'b0;
         is_ecall  = 1'b0;
         is_mret   = 1'b0;
         is_muldiv = 1'b0;
@@ -120,6 +122,7 @@ module decode import common::*;(
                             alu_op = ALU_SLL;
                         end else begin
                             reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                     3'b010: alu_op = ALU_SLT;  // slti
@@ -131,6 +134,7 @@ module decode import common::*;(
                             alu_op = ALU_SRA;
                         end else begin
                             reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                     3'b100: alu_op = ALU_XOR; // xori
@@ -138,6 +142,7 @@ module decode import common::*;(
                     3'b111: alu_op = ALU_AND; // andi
                     default: begin
                         reg_write = 1'b0;
+                        is_illegal = 1'b1;
                     end
                 endcase
             end
@@ -154,6 +159,7 @@ module decode import common::*;(
                             alu_op = ALU_SLL;
                         end else begin
                             reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                     3'b101: begin // srliw/sraiw
@@ -163,10 +169,12 @@ module decode import common::*;(
                             alu_op = ALU_SRA;
                         end else begin
                             reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                     default: begin
                         reg_write = 1'b0;
+                        is_illegal = 1'b1;
                     end
                 endcase
             end
@@ -186,11 +194,13 @@ module decode import common::*;(
                     {7'b0000000, 3'b010}: alu_op = ALU_SLT; // slt
                     {7'b0000000, 3'b011}: alu_op = ALU_SLTU;// sltu
                     default: begin
-                        // mul/div/divu/rem/remu (funct7 == M-extension)
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
                             reg_write = 1'b1;
                             br_funct3 = funct3;
+                        end else begin
+                            reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                 endcase
@@ -207,11 +217,13 @@ module decode import common::*;(
                     {7'b0000000, 3'b101}: alu_op = ALU_SRL; // srlw
                     {7'b0100000, 3'b101}: alu_op = ALU_SRA; // sraw
                     default: begin
-                        // mulw/divw/divuw/remw/remuw (funct7 == M-extension)
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
                             reg_write = 1'b1;
                             br_funct3 = funct3;
+                        end else begin
+                            reg_write = 1'b0;
+                            is_illegal = 1'b1;
                         end
                     end
                 endcase
@@ -262,6 +274,7 @@ module decode import common::*;(
                     default: begin
                         reg_write = 1'b0;
                         is_load   = 1'b0;
+                        is_illegal = 1'b1;
                     end
                 endcase
             end
@@ -278,6 +291,7 @@ module decode import common::*;(
                     3'b011: mem_size = MSIZE8; // sd
                     default: begin
                         is_store = 1'b0;
+                        is_illegal = 1'b1;
                     end
                 endcase
             end
@@ -291,6 +305,7 @@ module decode import common::*;(
                     end else if (instr == 32'h30200073) begin
                         is_mret   = 1'b1;
                     end
+                    // sfence.vma / wfi 等其它 funct3=000 系统指令：不 trap，按 NOP 流过
                 end else begin
                     is_csr      = 1'b1;
                     reg_write   = 1'b1;
@@ -337,7 +352,7 @@ module decode import common::*;(
                 is_trap = 1'b1; // nemu_trap
             end
             default: begin
-                // 其他指令暂不实现，按 NOP 处理
+                is_illegal = 1'b1;
             end
         endcase
     end

@@ -38,6 +38,7 @@ module mem_stage import common::*;(
     output logic out_is_store,
     output u64   out_mem_addr,
     output logic out_fault,
+    output logic out_misaligned,
     output logic out_fault_is_store,
     output logic out_is_ebreak,
     output logic out_is_trap,
@@ -75,6 +76,7 @@ module mem_stage import common::*;(
 
     logic cur_is_mem;
     logic cur_done;
+    logic addr_misaligned;
     u3    byte_off;
     u6    bit_off;
     u64   shifted_store_data;
@@ -104,34 +106,16 @@ module mem_stage import common::*;(
         end
     endfunction
 
-`ifdef VERILATOR
-    task automatic debug_log_mem(
-        input string run_id,
-        input string hypothesis_id,
-        input string location,
-        input string message,
-        input u64 pc,
-        input u64 addr,
-        input logic is_load,
-        input logic is_store,
-        input logic data_ok,
-        input logic pending_now
-    );
-        integer fd;
-        string payload;
+    function automatic logic addr_aligned(input u64 addr, input msize_t sz);
         begin
-            fd = $fopen("/home/jevonsshi/arch_2026/.cursor/debug-f06466.log", "a");
-            if (fd != 0) begin
-                payload = $sformatf(
-                    "{\"sessionId\":\"f06466\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":{\"pc\":\"0x%016h\",\"addr\":\"0x%016h\",\"isLoad\":%0d,\"isStore\":%0d,\"dataOk\":%0d,\"pending\":%0d},\"timestamp\":%0t}",
-                    run_id, hypothesis_id, location, message, pc, addr, is_load, is_store, data_ok, pending_now, $time
-                );
-                $fdisplay(fd, "%s", payload);
-                $fclose(fd);
-            end
+            unique case (sz)
+                MSIZE1: addr_aligned = 1'b1;
+                MSIZE2: addr_aligned = addr[0] == 1'b0;
+                MSIZE4: addr_aligned = addr[1:0] == 2'b00;
+                default: addr_aligned = addr[2:0] == 3'b000;
+            endcase
         end
-    endtask
-`endif
+    endfunction
 
     always_comb begin
         cur_valid         = pending ? 1'b1 : in_valid;
@@ -150,11 +134,12 @@ module mem_stage import common::*;(
         cur_is_trap       = pending ? pend_is_trap : in_is_trap;
         is_device_addr    = is_mmio_addr(cur_mem_addr);
         is_device_in      = is_mmio_addr(in_mem_addr);
+        addr_misaligned   = cur_valid & (cur_is_load | cur_is_store) & ~addr_aligned(cur_mem_addr, cur_mem_size);
     end
 
     assign cur_is_mem = cur_valid & (cur_is_load | cur_is_store);
     assign resp_fire  = cur_is_mem && (dresp.data_ok === 1'b1) && !data_ok_prev_q;
-    assign cur_done   = ~cur_is_mem | resp_fire | dresp.fault;
+    assign cur_done   = ~cur_is_mem | resp_fire | dresp.fault | addr_misaligned;
     assign mem_wait   = cur_is_mem & ~cur_done;
 
     assign byte_off          = cur_mem_addr[2:0];
@@ -187,7 +172,7 @@ module mem_stage import common::*;(
         endcase
     end
 
-    assign dreq.valid  = cur_is_mem;
+    assign dreq.valid  = cur_is_mem & ~addr_misaligned;
     assign dreq.addr   = cur_mem_addr;
     assign dreq.size   = cur_mem_size;
     assign dreq.strobe = cur_is_store ? shifted_strobe : 8'd0;
@@ -198,12 +183,13 @@ module mem_stage import common::*;(
     assign out_pc        = cur_pc;
     assign out_instr     = cur_instr;
     assign out_rd        = cur_rd;
-    assign out_reg_write = cur_reg_write & ~(cur_is_mem & dresp.fault);
+    assign out_reg_write = cur_reg_write & ~(cur_is_mem & dresp.fault) & ~(cur_is_mem & addr_misaligned);
     assign out_result    = cur_is_load ? load_result : cur_result;
     assign out_is_load   = cur_is_load;
     assign out_is_store  = cur_is_store;
     assign out_mem_addr  = cur_mem_addr;
     assign out_fault     = cur_is_mem & dresp.fault;
+    assign out_misaligned = addr_misaligned & cur_valid & cur_done;
     assign out_fault_is_store = cur_is_store;
     assign out_is_ebreak = cur_is_ebreak;
     assign out_is_trap   = cur_is_trap;
@@ -211,22 +197,13 @@ module mem_stage import common::*;(
 
     always_ff @(posedge clk) begin
         if (reset || flush) begin
-`ifdef VERILATOR
-            if (pending) begin
-                debug_log_mem("pre-fix", "H1", "mem.sv:flush_clear", "flush/reset cleared pending request",
-                              pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);
-            end
-`endif
             pending <= 1'b0;
             req_priv_q <= 2'b11;
             data_ok_prev_q <= 1'b0;
         end else begin
             data_ok_prev_q <= dresp.data_ok;
-            if (!pending && in_valid && (in_is_load || in_is_store) && !resp_fire && !dresp.fault) begin
-`ifdef VERILATOR
-                debug_log_mem("pre-fix", "H1", "mem.sv:pending_set", "request entered pending wait",
-                              in_pc, in_mem_addr, in_is_load, in_is_store, dresp.data_ok, pending);
-`endif
+            if (!pending && in_valid && (in_is_load || in_is_store) &&
+                addr_aligned(in_mem_addr, in_mem_size) && !resp_fire && !dresp.fault) begin
                 pending             <= 1'b1;
                 pend_pc             <= in_pc;
                 pend_instr          <= in_instr;
@@ -243,10 +220,6 @@ module mem_stage import common::*;(
                 pend_is_trap        <= in_is_trap;
                 req_priv_q          <= current_priv;
             end else if (pending && (resp_fire || dresp.fault)) begin
-`ifdef VERILATOR
-                debug_log_mem("pre-fix", "H1", "mem.sv:pending_clear", "pending request observed data_ok",
-                              pend_pc, pend_mem_addr, pend_is_load, pend_is_store, dresp.data_ok, pending);
-`endif
                 pending <= 1'b0;
             end
         end
