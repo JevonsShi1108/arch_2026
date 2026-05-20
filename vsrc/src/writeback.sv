@@ -23,6 +23,7 @@ module writeback_stage import common::*;(
     output logic wb_is_ebreak,
     output logic wb_is_trap
 );
+    // 每条到达 WB 的指令都必须 wb_valid（供 Difftest / instr_cnt）；无 reg 写的指令也要提交。
     assign wb_valid     = in_valid;
     assign wb_pc        = in_pc;
     assign wb_instr     = in_instr;

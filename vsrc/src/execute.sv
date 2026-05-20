@@ -166,12 +166,13 @@ module execute import common::*;(
         if (is_jal || is_jalr) begin
             wb_val = pc_plus4;
         end
-        if (is_word) begin
-            wb_val = {{32{wb_val[31]}}, wb_val[31:0]};
-        end
-
         if (is_muldiv) begin
             wb_val = muldiv_result;
+            if (is_word) begin
+                wb_val = {{32{wb_val[31]}}, wb_val[31:0]};
+            end
+        end else if (is_word) begin
+            wb_val = {{32{wb_val[31]}}, wb_val[31:0]};
         end
     end
 

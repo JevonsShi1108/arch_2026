@@ -459,14 +459,36 @@ module core import common::*; import csr_pkg::*;(
 	// Execute
 	logic muldiv_busy, muldiv_ready, muldiv_result_valid;
 	u64   muldiv_result;
+	logic muldiv_unsigned_w;
+	u64   muldiv_op_a;
+	u64   muldiv_op_b;
+
+	assign muldiv_unsigned_w = id_ex.is_word &&
+	                          ((id_ex.br_funct3 == 3'b101) || (id_ex.br_funct3 == 3'b111));
+
+	always_comb begin
+		if (id_ex.is_word) begin
+			if (muldiv_unsigned_w) begin
+				muldiv_op_a = {32'd0, id_ex.op1[31:0]};
+				muldiv_op_b = {32'd0, id_ex.rs2_val[31:0]};
+			end else begin
+				muldiv_op_a = {{32{id_ex.op1[31]}}, id_ex.op1[31:0]};
+				muldiv_op_b = {{32{id_ex.rs2_val[31]}}, id_ex.rs2_val[31:0]};
+			end
+		end else begin
+			muldiv_op_a = id_ex.op1;
+			muldiv_op_b = id_ex.rs2_val;
+		end
+	end
 
 	muldiv u_muldiv(
 		.clk,
 		.reset,
 		.req_valid(id_ex.valid & id_ex.is_muldiv & !muldiv_busy & !muldiv_ready),
-		.op_a(id_ex.op1),
-		.op_b(id_ex.rs2_val),
+		.op_a(muldiv_op_a),
+		.op_b(muldiv_op_b),
 		.op_sel(id_ex.br_funct3),
+		.is_word(id_ex.is_word),
 		.busy(muldiv_busy),
 		.ready(muldiv_ready),
 		.result_valid(muldiv_result_valid),
@@ -1036,29 +1058,34 @@ module core import common::*; import csr_pkg::*;(
 					mem_wb.csr_new_data <= ex_mem.csr_new_data;
 				end
 
-				// MEM pipeline register
+				// MEM 流水寄存器：乘除法多周期期间不得把 EX 无效/中间结果锁进 ex_mem。
+				// ex_mem.valid <= ex_valid && (!id_ex.is_muldiv | muldiv_result_valid)：
+				// 在 NBA 下，M 进入 id_ex 的同一拍 id_ex 仍为旧指令 P，故 is_muldiv 为 0，本拍仍把 EX(P) 写入 ex_mem；
+				// 之后 M 占住 EX 且结果未就绪时拉低 valid，避免 MEM 每拍重复看见同一条“有效”指令，同时不得冻结 mem_wb（否则 P 无法退休）。
 				if (suppress_wrong_path_wb) begin
 					ex_mem.valid <= 1'b0;
 				end else begin
-					ex_mem.valid     <= ex_valid;
-					ex_mem.pc        <= ex_out_pc;
-					ex_mem.instr     <= ex_out_instr;
-					ex_mem.rd        <= ex_out_rd;
-					ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
-					ex_mem.result    <= ex_result_final;
-					ex_mem.is_load   <= ex_out_is_load;
-					ex_mem.is_store  <= ex_out_is_store;
-					ex_mem.mem_size  <= ex_out_mem_size;
-					ex_mem.load_unsigned <= ex_out_load_unsigned;
-					ex_mem.mem_addr  <= ex_out_mem_addr;
-					ex_mem.store_data<= ex_out_store_data;
-					ex_mem.is_ebreak <= ex_out_is_ebreak;
-					ex_mem.is_trap   <= ex_out_is_trap;
-					ex_mem.is_csr    <= id_ex.is_csr;
-					ex_mem.csr_we    <= ex_csr_we;
-					ex_mem.csr_addr  <= id_ex.csr_addr;
-					ex_mem.csr_old_data <= ex_csr_old_data;
-					ex_mem.csr_new_data <= ex_csr_new_data;
+					ex_mem.valid <= ex_valid && (!id_ex.is_muldiv | muldiv_result_valid);
+					if (ex_valid && (!id_ex.is_muldiv | muldiv_result_valid)) begin
+						ex_mem.pc        <= ex_out_pc;
+						ex_mem.instr     <= ex_out_instr;
+						ex_mem.rd        <= ex_out_rd;
+						ex_mem.reg_write <= ex_out_reg_write & ~ecall_fire & ~instr_fault_fire;
+						ex_mem.result    <= ex_result_final;
+						ex_mem.is_load   <= ex_out_is_load;
+						ex_mem.is_store  <= ex_out_is_store;
+						ex_mem.mem_size  <= ex_out_mem_size;
+						ex_mem.load_unsigned <= ex_out_load_unsigned;
+						ex_mem.mem_addr  <= ex_out_mem_addr;
+						ex_mem.store_data<= ex_out_store_data;
+						ex_mem.is_ebreak <= ex_out_is_ebreak;
+						ex_mem.is_trap   <= ex_out_is_trap;
+						ex_mem.is_csr    <= id_ex.is_csr;
+						ex_mem.csr_we    <= ex_csr_we;
+						ex_mem.csr_addr  <= id_ex.csr_addr;
+						ex_mem.csr_old_data <= ex_csr_old_data;
+						ex_mem.csr_new_data <= ex_csr_new_data;
+					end
 				end
 
 				if (pipeline_flush_young) begin
@@ -1106,7 +1133,8 @@ module core import common::*; import csr_pkg::*;(
 				end else if (load_use_hazard) begin
 					id_ex <= '0;
 				end else if (muldiv_stall) begin
-					id_ex <= id_ex;
+					id_ex  <= id_ex;
+					if_id  <= if_id;
 				end else begin
 					// ID/EX
 					id_ex.valid      <= if_id.valid;
