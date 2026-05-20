@@ -46,6 +46,7 @@ module SimTop import common::*;(
 
     IBusToCBus icvt(.*);
     DBusToCBus dcvt(.*);
+
     CBusArbiter mux(
         .clk(clock), .reset,
         .ireqs({icreq, dcreq}),

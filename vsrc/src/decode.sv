@@ -186,12 +186,12 @@ module decode import common::*;(
                     {7'b0000000, 3'b010}: alu_op = ALU_SLT; // slt
                     {7'b0000000, 3'b011}: alu_op = ALU_SLTU;// sltu
                     default: begin
-                        // TODO: 之后在这里接入 M 扩展 mul/div/rem 指令译码
-                        // mul/div/divu/rem/remu
+                        // mul/div/divu/rem/remu (funct7 == M-extension)
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
+                            reg_write = 1'b1;
+                            br_funct3 = funct3;
                         end
-                        reg_write = 1'b0;
                     end
                 endcase
             end
@@ -207,12 +207,12 @@ module decode import common::*;(
                     {7'b0000000, 3'b101}: alu_op = ALU_SRL; // srlw
                     {7'b0100000, 3'b101}: alu_op = ALU_SRA; // sraw
                     default: begin
-                        // TODO: 之后在这里接入 M 扩展 32 位指令译码
-                        // mulw/divw/divuw/remw/remuw
+                        // mulw/divw/divuw/remw/remuw (funct7 == M-extension)
                         if (funct7 == 7'b0000001) begin
                             is_muldiv = 1'b1;
+                            reg_write = 1'b1;
+                            br_funct3 = funct3;
                         end
-                        reg_write = 1'b0;
                     end
                 endcase
             end
@@ -334,8 +334,7 @@ module decode import common::*;(
                 end
             end
             7'b1101011: begin
-                // Lab1 结束指令（nemu_trap）
-                is_trap = 1'b1;
+                is_trap = 1'b1; // nemu_trap
             end
             default: begin
                 // 其他指令暂不实现，按 NOP 处理

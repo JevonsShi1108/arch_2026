@@ -6,10 +6,7 @@
 `else
 
 `endif
-/**
- * this implementation is not efficient, since
- * it adds one cycle lantency to all requests.
- */
+// Round-robin arbiter: issues a new request in the same cycle when idle.
 
 module CBusArbiter
 	import common::*;#(
@@ -28,19 +25,18 @@ module CBusArbiter
 );
     logic busy;
     int index, select;
+    int grant_ptr;
     logic [1:0] saved_priv;
     cbus_req_t saved_req, selected_req;
 
-    // Latch selected request, then hold it until response last.
-    assign oreq = busy ? saved_req : '0;
-    assign opriv = busy ? saved_priv : 2'b11;
+    assign oreq = busy ? saved_req : (selected_req.valid ? selected_req : '0);
+    assign opriv = busy ? saved_priv : iprivs[select];
     assign selected_req = ireqs[select];
 
-    // select a preferred request
     always_comb begin
-        select = 0;
-
-        for (int i = 0; i < NUM_INPUTS; i++) begin
+        select = grant_ptr;
+        for (int j = 0; j < NUM_INPUTS; j++) begin
+            int i = (grant_ptr + j) % NUM_INPUTS;
             if (ireqs[i].valid) begin
                 select = i;
                 break;
@@ -63,8 +59,10 @@ module CBusArbiter
     always_ff @(posedge clk)
     if (~reset) begin
         if (busy) begin
-            if ((oresp.ready === 1'b1) && (oresp.last === 1'b1))
+            if ((oresp.ready === 1'b1) && (oresp.last === 1'b1)) begin
                 {busy, saved_req} <= '0;
+                grant_ptr <= (index == MAX_INDEX) ? 0 : index + 1;
+            end
         end else begin
             busy <= selected_req.valid;
             index <= select;
@@ -72,7 +70,7 @@ module CBusArbiter
             saved_priv <= iprivs[select];
         end
     end else begin
-        {busy, index, saved_req, saved_priv} <= '0;
+        {busy, index, saved_req, saved_priv, grant_ptr} <= '0;
     end
 
     `UNUSED_OK({saved_req, saved_priv});

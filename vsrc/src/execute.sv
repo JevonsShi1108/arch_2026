@@ -170,7 +170,6 @@ module execute import common::*;(
             wb_val = {{32{wb_val[31]}}, wb_val[31:0]};
         end
 
-        // TODO: 之后 M 扩展执行路径改为 muldiv 多周期单元握手。
         if (is_muldiv) begin
             wb_val = muldiv_result;
         end
@@ -189,10 +188,9 @@ module execute import common::*;(
     assign out_is_ebreak  = is_ebreak;
     assign out_is_trap    = is_trap;
     assign out_result     = wb_val;
-    assign out_reg_write  = valid & reg_write & !is_trap & !is_branch & !is_muldiv & !is_store;
+    assign out_reg_write  = valid & reg_write & !is_trap & !is_branch & !is_store &
+                            (!is_muldiv | muldiv_result_valid);
 
-    // 现在 mul/div 未实现: 检测到 muldiv 指令时先不写回，由 TODO 接管。
-    // EX 给出真实跳转结果，与静态预测结果比对后触发重定向/flush。
     assign branch_mispredict = valid & is_ctrl &
                                ((branch_taken != pred_taken) |
                                 (branch_taken & pred_taken & (branch_target != pred_target)));

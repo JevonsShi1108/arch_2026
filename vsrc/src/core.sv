@@ -4,9 +4,9 @@
 `ifdef VERILATOR
 `include "include/common.sv"
 `include "include/csr.sv"
-`include "src/predictor_static.sv"
+`include "src/predictor_bht.sv"
 `include "src/regfile.sv"
-`include "src/muldiv_stub.sv"
+`include "src/muldiv.sv"
 `include "src/fetch.sv"
 `include "src/decode.sv"
 `include "src/execute.sv"
@@ -299,8 +299,10 @@ module core import common::*; import csr_pkg::*;(
 	logic ex_mem_is_wrong_path;
 	logic suppress_wrong_path_wb;
 
-	assign decode_jal_redirect = if_id.valid && (dec_is_jal || dec_is_jalr) && ~mem_wait && ~cpu_halt;
-	assign decode_branch_redirect = if_id.valid && dec_is_branch && dec_pred_taken && ~mem_wait && ~cpu_halt;
+	logic muldiv_stall;
+
+	assign decode_jal_redirect = if_id.valid && (dec_is_jal || dec_is_jalr) && ~cpu_halt;
+	assign decode_branch_redirect = if_id.valid && dec_is_branch && dec_pred_taken && ~cpu_halt;
 	assign decode_pred_redirect = decode_jal_redirect | decode_branch_redirect;
 	assign pipeline_flush_young = branch_mispredict | csr_redirect_valid | trap_redirect_valid;
 	assign ex_mem_is_wrong_path = ex_mem.valid && id_ex.valid && (ex_mem.pc == (id_ex.pc + 64'd4));
@@ -308,14 +310,14 @@ module core import common::*; import csr_pkg::*;(
 
 	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid |
 	                              branch_mispredict | decode_pred_redirect;
-	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~mem_wait & ~cpu_halt;
+	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
 	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
 	                     (csr_redirect_valid ? csr_redirect_pc :
 	                     (branch_mispredict ? branch_correct_pc :
 	                     (decode_pred_redirect ? dec_pred_target : 64'd0)));
 	assign fetch_accept = fetch_valid && !fetch_stale && !cpu_halt && !mem_wait &&
-	                     !fetch_redirect_valid_gated && !instr_fault_fire;
+	                     !fetch_redirect_valid_gated && !instr_fault_fire && !muldiv_stall;
 
 	logic stop_fetch;
 	assign stop_fetch = cpu_halt;
@@ -391,16 +393,6 @@ module core import common::*; import csr_pkg::*;(
 		.alu_op(dec_alu_op)
 	);
 
-	predictor_static u_predictor(
-		.is_branch(dec_is_branch),
-		.is_jal(dec_is_jal),
-		.is_jalr(dec_is_jalr),
-		.pc(if_id.pc),
-		.target(if_id.pc + dec_imm),
-		.pred_taken(dec_pred_taken),
-		.pred_target(dec_pred_target)
-	);
-
 	// Register file + forwarding
 	u64 rf_rdata1, rf_rdata2;
 	u64 rf_reg_state[31:0];
@@ -459,22 +451,28 @@ module core import common::*; import csr_pkg::*;(
 		end
 	end
 
+	u64 dec_pred_target_base;
+	assign dec_pred_target_base = dec_is_jalr ?
+	                              ((id_op1_pre + dec_imm) & 64'hffff_ffff_ffff_fffe) :
+	                              (if_id.pc + dec_imm);
+
 	// Execute
 	logic muldiv_busy, muldiv_ready, muldiv_result_valid;
 	u64   muldiv_result;
 
-	muldiv_stub u_muldiv_stub(
+	muldiv u_muldiv(
 		.clk,
 		.reset,
-		.req_valid(id_ex.valid & id_ex.is_muldiv),
+		.req_valid(id_ex.valid & id_ex.is_muldiv & !muldiv_busy & !muldiv_ready),
 		.op_a(id_ex.op1),
 		.op_b(id_ex.rs2_val),
-		.op_sel(3'd0),
+		.op_sel(id_ex.br_funct3),
 		.busy(muldiv_busy),
 		.ready(muldiv_ready),
 		.result_valid(muldiv_result_valid),
 		.result(muldiv_result)
 	);
+	assign muldiv_stall = id_ex.valid && id_ex.is_muldiv && (muldiv_busy || !muldiv_ready);
 
 	logic ex_valid, ex_out_reg_write, ex_out_is_load, ex_out_is_store;
 	logic ex_out_load_unsigned, ex_out_is_ebreak, ex_out_is_trap;
@@ -531,6 +529,28 @@ module core import common::*; import csr_pkg::*;(
 		.out_is_trap(ex_out_is_trap),
 		.branch_mispredict,
 		.branch_correct_pc
+	);
+
+	logic bht_train_valid;
+	logic bht_train_taken;
+	u64   bht_train_pc;
+	assign bht_train_valid = ex_valid && id_ex.is_branch;
+	assign bht_train_taken = (branch_correct_pc != (id_ex.pc + 64'd4));
+	assign bht_train_pc    = id_ex.pc;
+
+	predictor_bht u_predictor_bht(
+		.clk,
+		.reset,
+		.is_branch(dec_is_branch),
+		.is_jal(dec_is_jal),
+		.is_jalr(dec_is_jalr),
+		.pc(if_id.pc),
+		.target(dec_pred_target_base),
+		.train_valid(bht_train_valid),
+		.train_taken(bht_train_taken),
+		.train_pc(bht_train_pc),
+		.pred_taken(dec_pred_taken),
+		.pred_target(dec_pred_target)
 	);
 
 	u64   ex_csr_src_data;
@@ -971,7 +991,6 @@ module core import common::*; import csr_pkg::*;(
 				ex_mem.valid<= 1'b0;
 				mem_wb.valid<= 1'b0;
 			end else if (mem_wait) begin
-				// 访存未完成：冻结前级，避免重复发射与乱序提交
 				mem_wb.valid <= 1'b0;
 			end else begin
 `ifdef VERILATOR
@@ -1085,8 +1104,9 @@ module core import common::*; import csr_pkg::*;(
 					id_ex.pred_target<= dec_pred_target;
 					if_id.valid <= 1'b0;
 				end else if (load_use_hazard) begin
-					// load-use：插入一个气泡，等待 load 结果到 MEM/WB 可前递
 					id_ex <= '0;
+				end else if (muldiv_stall) begin
+					id_ex <= id_ex;
 				end else begin
 					// ID/EX
 					id_ex.valid      <= if_id.valid;
