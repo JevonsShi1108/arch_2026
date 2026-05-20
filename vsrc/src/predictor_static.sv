@@ -14,14 +14,15 @@ module predictor_static import common::*;(
     output logic pred_taken,
     output u64   pred_target
 );
-    // Lab1: 固定静态预测策略，统一采用 Always-Not-Taken。
-    // TODO(Lab2+): 在这里替换为可插拔动态预测器（BHT/BTB/RAS）。
+    // 条件分支：Always-Not-Taken；JAL/JALR：Always-Taken（目标由译码级提供）。
     logic [63:0] pc_plus4;
-    assign pc_plus4  = pc + 64'd4;
-    assign pred_taken = 1'b0;
-    assign pred_target = pc_plus4;
+    logic        jump_pred;
+    assign pc_plus4   = pc + 64'd4;
+    assign jump_pred  = is_jal | is_jalr;
+    assign pred_taken = jump_pred;
+    assign pred_target = jump_pred ? target : pc_plus4;
 
-    `UNUSED_OK({is_branch, is_jal, is_jalr, target})
+    `UNUSED_OK({is_branch})
 endmodule
 
 `endif

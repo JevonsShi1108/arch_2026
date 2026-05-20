@@ -99,9 +99,13 @@ module MMU import common::*;(
 
     assign translate_en_q = (priv_mode_q != PRV_M) && (satp_q[63:60] == SATP_MODE_SV39);
     assign dn_resp_fire = (dn_resp.ready === 1'b1) && (dn_resp.last === 1'b1);
-    // For read responses, require one armed cycle before consuming data.
+    // For read responses, require one armed cycle before consuming data on FPGA.
     // Keep write path immediate so MMIO writes are not delayed.
+`ifdef VERILATOR
+    assign dn_done = dn_resp_fire;
+`else
     assign dn_done = (state == MMU_FINAL_REQ && req_q.is_write) ? dn_resp_fire : (resp_armed_q && dn_resp_fire);
+`endif
     assign req_vpn2 = req_q.addr[38:30];
     assign req_vpn1 = req_q.addr[29:21];
     assign req_vpn0 = req_q.addr[20:12];

@@ -257,6 +257,17 @@ module core import common::*; import csr_pkg::*;(
 		end
 	endfunction
 
+	function automatic logic csr_write_needs_flush(input u12 csr_addr_i);
+		begin
+			unique case (csr_addr_i)
+				CSR_MSTATUS,
+				CSR_MTVEC,
+				CSR_SATP: csr_write_needs_flush = 1'b1;
+				default:  csr_write_needs_flush = 1'b0;
+			endcase
+		end
+	endfunction
+
 	assign csr_mhartid = 64'd0;
 	assign priv_mode_o = mmu_priv;
 	assign satp_o = csr_satp;
@@ -280,18 +291,28 @@ module core import common::*; import csr_pkg::*;(
 
 	assign trap_redirect_pc = (ecall_fire | instr_fault_fire | mem_fault_fire) ? exec_mtvec_view :
 	                          exec_mepc_view;
-	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid | branch_mispredict;
+
+	logic decode_jal_redirect;
+	assign decode_jal_redirect = if_id.valid && (dec_is_jal || dec_is_jalr) && ~mem_wait && ~cpu_halt;
+
+	assign fetch_redirect_valid = ecall_fire | mem_fault_fire | mret_fire | csr_redirect_valid |
+	                              branch_mispredict | decode_jal_redirect;
 	assign fetch_redirect_valid_gated = fetch_redirect_valid & ~mem_wait & ~cpu_halt;
 	assign redirect_valid = trap_redirect_valid | csr_redirect_valid | branch_mispredict;
 	assign redirect_pc = trap_redirect_valid ? trap_redirect_pc :
-	                     (csr_redirect_valid ? csr_redirect_pc : branch_correct_pc);
+	                     (csr_redirect_valid ? csr_redirect_pc :
+	                     (branch_mispredict ? branch_correct_pc :
+	                     (decode_jal_redirect ? dec_pred_target : 64'd0)));
 	assign fetch_accept = fetch_valid && !fetch_stale && !cpu_halt && !mem_wait &&
 	                     !fetch_redirect_valid_gated && !instr_fault_fire;
+
+	logic stop_fetch;
+	assign stop_fetch = cpu_halt;
 
 	fetch u_fetch(
 		.clk,
 		.reset,
-		.stop_fetch(cpu_halt | mem_wait),
+		.stop_fetch,
 		.flush(instr_fault_fire),
 		.redirect_valid(fetch_redirect_valid_gated),
 		.redirect_pc(redirect_pc),
@@ -509,19 +530,71 @@ module core import common::*; import csr_pkg::*;(
 	u64   ex_result_final;
 
 	assign ex_csr_src_data = id_ex.csr_use_imm ? {59'd0, id_ex.rs1} : id_ex.op1;
+
+	u64 csr_fwd_mstatus, csr_fwd_mtvec, csr_fwd_mip, csr_fwd_mie;
+	u64 csr_fwd_mscratch, csr_fwd_mcause, csr_fwd_mtval, csr_fwd_mepc;
+	u64 csr_fwd_mcycle, csr_fwd_satp;
+
+	always_comb begin
+		csr_fwd_mstatus  = csr_mstatus;
+		csr_fwd_mtvec    = csr_mtvec;
+		csr_fwd_mip      = csr_mip;
+		csr_fwd_mie      = csr_mie;
+		csr_fwd_mscratch = csr_mscratch;
+		csr_fwd_mcause   = csr_mcause;
+		csr_fwd_mtval    = csr_mtval;
+		csr_fwd_mepc     = csr_mepc;
+		csr_fwd_mcycle   = csr_mcycle;
+		csr_fwd_satp     = csr_satp;
+
+		if (mem_wb.valid && mem_wb.is_csr && mem_wb.csr_we) begin
+			unique case (mem_wb.csr_addr)
+				CSR_MSTATUS:  csr_fwd_mstatus  = mem_wb.csr_new_data;
+				CSR_MTVEC:    csr_fwd_mtvec    = mem_wb.csr_new_data;
+				CSR_MIP:      csr_fwd_mip      = mem_wb.csr_new_data;
+				CSR_MIE:      csr_fwd_mie      = mem_wb.csr_new_data;
+				CSR_MSCRATCH: csr_fwd_mscratch = mem_wb.csr_new_data;
+				CSR_MCAUSE:   csr_fwd_mcause   = mem_wb.csr_new_data;
+				CSR_MTVAL:    csr_fwd_mtval    = mem_wb.csr_new_data;
+				CSR_MEPC:     csr_fwd_mepc     = mem_wb.csr_new_data;
+				CSR_MCYCLE:   csr_fwd_mcycle   = mem_wb.csr_new_data;
+				CSR_SATP:     csr_fwd_satp     = mem_wb.csr_new_data;
+				default: begin
+				end
+			endcase
+		end
+
+		if (ex_mem.valid && ex_mem.is_csr && ex_mem.csr_we) begin
+			unique case (ex_mem.csr_addr)
+				CSR_MSTATUS:  csr_fwd_mstatus  = ex_mem.csr_new_data;
+				CSR_MTVEC:    csr_fwd_mtvec    = ex_mem.csr_new_data;
+				CSR_MIP:      csr_fwd_mip      = ex_mem.csr_new_data;
+				CSR_MIE:      csr_fwd_mie      = ex_mem.csr_new_data;
+				CSR_MSCRATCH: csr_fwd_mscratch = ex_mem.csr_new_data;
+				CSR_MCAUSE:   csr_fwd_mcause   = ex_mem.csr_new_data;
+				CSR_MTVAL:    csr_fwd_mtval    = ex_mem.csr_new_data;
+				CSR_MEPC:     csr_fwd_mepc     = ex_mem.csr_new_data;
+				CSR_MCYCLE:   csr_fwd_mcycle   = ex_mem.csr_new_data;
+				CSR_SATP:     csr_fwd_satp     = ex_mem.csr_new_data;
+				default: begin
+				end
+			endcase
+		end
+	end
+
 	assign ex_csr_old_data = csr_read_data(
 		id_ex.csr_addr,
-		csr_mstatus,
-		csr_mtvec,
-		csr_mip,
-		csr_mie,
-		csr_mscratch,
-		csr_mcause,
-		csr_mtval,
-		csr_mepc,
-		csr_mcycle,
+		csr_fwd_mstatus,
+		csr_fwd_mtvec,
+		csr_fwd_mip,
+		csr_fwd_mie,
+		csr_fwd_mscratch,
+		csr_fwd_mcause,
+		csr_fwd_mtval,
+		csr_fwd_mepc,
+		csr_fwd_mcycle,
 		csr_mhartid,
-		csr_satp
+		csr_fwd_satp
 	);
 
 	always_comb begin
@@ -537,7 +610,7 @@ module core import common::*; import csr_pkg::*;(
 	assign ex_csr_new_data = csr_apply_mask(id_ex.csr_addr, ex_csr_old_data, ex_csr_candidate_new);
 	assign ex_csr_we = id_ex.valid & id_ex.is_csr & id_ex.csr_we_intent & (id_ex.csr_addr != CSR_MHARTID);
 	assign ex_result_final = id_ex.is_csr ? ex_csr_old_data : ex_out_result;
-	assign csr_redirect_valid = ex_csr_we;
+	assign csr_redirect_valid = ex_csr_we & csr_write_needs_flush(id_ex.csr_addr);
 	assign csr_redirect_pc = id_ex.pc + 64'd4;
 	assign ecall_mcause = ecall_cause_by_mode(priv_mode);
 
@@ -687,6 +760,12 @@ module core import common::*; import csr_pkg::*;(
 	u64 cycle_cnt_n, instr_cnt_n;
 	assign cycle_cnt_n = cycle_cnt + 64'd1;
 	assign instr_cnt_n = instr_cnt + (wb_valid ? 64'd1 : 64'd0);
+
+`ifdef VERILATOR
+	u64 cyc_mem_wait, cyc_stop_fetch, cnt_branch_mispredict, cnt_csr_redirect, cnt_trap_redirect;
+	logic perf_reported;
+`endif
+
 	logic load_use_hazard;
 	logic load_use_hazard_idex;
 	logic load_use_hazard_exmem;
@@ -718,6 +797,14 @@ module core import common::*; import csr_pkg::*;(
 			cpu_halt     <= 1'b0;
 			cycle_cnt <= 64'd0;
 			instr_cnt <= 64'd0;
+`ifdef VERILATOR
+			cyc_mem_wait <= 64'd0;
+			cyc_stop_fetch <= 64'd0;
+			cnt_branch_mispredict <= 64'd0;
+			cnt_csr_redirect <= 64'd0;
+			cnt_trap_redirect <= 64'd0;
+			perf_reported <= 1'b0;
+`endif
 			mem_wait_cycles <= '0;
 			csr_mstatus  <= 64'd0;
 			csr_mtvec    <= 64'd0;
@@ -742,6 +829,32 @@ module core import common::*; import csr_pkg::*;(
 			cycle_cnt <= cycle_cnt_n;
 			instr_cnt <= instr_cnt_n;
 			csr_mcycle <= csr_mcycle + 64'd1;
+`ifdef VERILATOR
+			if (mem_wait) begin
+				cyc_mem_wait <= cyc_mem_wait + 64'd1;
+			end
+			if (stop_fetch) begin
+				cyc_stop_fetch <= cyc_stop_fetch + 64'd1;
+			end
+			if (branch_mispredict) begin
+				cnt_branch_mispredict <= cnt_branch_mispredict + 64'd1;
+			end
+			if (csr_redirect_valid) begin
+				cnt_csr_redirect <= cnt_csr_redirect + 64'd1;
+			end
+			if (trap_redirect_valid) begin
+				cnt_trap_redirect <= cnt_trap_redirect + 64'd1;
+			end
+			if (wb_is_trap && !perf_reported) begin
+				perf_reported <= 1'b1;
+				$display("[PERF] mem_wait cycles=%0d (%.1f%%), stop_fetch cycles=%0d (%.1f%%)",
+				         cyc_mem_wait, 100.0 * cyc_mem_wait / cycle_cnt_n,
+				         cyc_stop_fetch, 100.0 * cyc_stop_fetch / cycle_cnt_n);
+				$display("[PERF] branch_mispredict=%0d (%.3f/inst), csr_redirect=%0d, trap_redirect=%0d",
+				         cnt_branch_mispredict, cnt_branch_mispredict * 1.0 / instr_cnt_n,
+				         cnt_csr_redirect, cnt_trap_redirect);
+			end
+`endif
 			if (mem_wait) begin
 				mem_wait_cycles <= mem_wait_cycles + 8'd1;
 			end else begin
@@ -914,6 +1027,44 @@ module core import common::*; import csr_pkg::*;(
 					// 冲刷水线中所有年轻指令
 					if_id.valid <= 1'b0;
 					id_ex.valid <= 1'b0;
+				end else if (decode_jal_redirect) begin
+					// JAL/JALR：将跳转指令送入 EX，取指重定向到目标，丢弃 fall-through
+					id_ex.valid      <= 1'b1;
+					id_ex.pc         <= if_id.pc;
+					id_ex.instr      <= if_id.instr;
+					id_ex.rd         <= dec_rd;
+					id_ex.rs1        <= dec_rs1;
+					id_ex.rs2        <= dec_rs2;
+					id_ex.op1        <= id_op1_pre;
+					id_ex.rs2_val    <= id_rs2_pre;
+					id_ex.imm        <= dec_imm;
+					id_ex.reg_write  <= dec_reg_write;
+					id_ex.is_imm     <= dec_is_imm;
+					id_ex.is_word    <= dec_is_word;
+					id_ex.is_branch  <= dec_is_branch;
+					id_ex.is_jal     <= dec_is_jal;
+					id_ex.is_jalr    <= dec_is_jalr;
+					id_ex.is_auipc   <= dec_is_auipc;
+					id_ex.is_lui     <= dec_is_lui;
+					id_ex.is_load    <= dec_is_load;
+					id_ex.is_store   <= dec_is_store;
+					id_ex.mem_size   <= dec_mem_size;
+					id_ex.load_unsigned <= dec_load_unsigned;
+					id_ex.is_ebreak  <= dec_is_ebreak;
+					id_ex.is_trap    <= dec_is_trap;
+					id_ex.is_ecall   <= dec_is_ecall;
+					id_ex.is_mret    <= dec_is_mret;
+					id_ex.is_muldiv  <= dec_is_muldiv;
+					id_ex.is_csr     <= dec_is_csr;
+					id_ex.csr_addr   <= dec_csr_addr;
+					id_ex.csr_op     <= dec_csr_op;
+					id_ex.csr_use_imm<= dec_csr_use_imm;
+					id_ex.csr_we_intent <= dec_csr_we_intent;
+					id_ex.br_funct3  <= dec_br_funct3;
+					id_ex.alu_op     <= dec_alu_op;
+					id_ex.pred_taken <= dec_pred_taken;
+					id_ex.pred_target<= dec_pred_target;
+					if_id.valid <= 1'b0;
 				end else if (load_use_hazard) begin
 					// load-use：插入一个气泡，等待 load 结果到 MEM/WB 可前递
 					id_ex <= '0;
